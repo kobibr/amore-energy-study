@@ -1,0 +1,46 @@
+# Build / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Python virtualenvs (you use conda sage_env; harmless to ignore stray ones)
+.venv/
+venv/
+
+# Trace data — mock/PPK2 writes here, never committed
+measurement/traces/
+!measurement/traces/.gitkeep
+
+# Calibration logs — explicit per-file commits only
+measurement/calibration-logs/*.csv
+
+# Private working notes
+internal/
+!internal/.gitkeep
+
+# OS junk
+.DS_Store
+*.swp
+*~
+# Scratch and tooling
+1.sh
+*.out
+*.pyc
+*.bak.day*
+*.bak
+pkk_moc.log
+review_bundle.txt
+review_bundle_*.zip
+/tmp/
+logs/
+
+# Workspace backups (e.g. .before-O3-doc) — never committed
+*.before-*
+
+# Editor / IDE settings — local only
+.vscode/

@@ -1,0 +1,4 @@
+[submodule "firmware/amore-fw"]
+	path = firmware/amore-fw
+	url = git@github.com:kobibr/amore-bn254-cortex-m4.git
+	branch = main

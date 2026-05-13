@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amore-energy-study"
+version = "0.0.1"
+description = "AmorE protocol energy measurement: Mock PPK2, run_cell, analysis."
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.1",
+    "typeguard>=4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["measurement/ppk2-control/tests", "analysis/tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+
+[tool.setuptools]
+packages = ["analysis", "analysis.fixtures", "analysis.tests"]
+
+[tool.setuptools.package-dir]
+"" = "."
