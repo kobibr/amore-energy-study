@@ -307,41 +307,48 @@ class MockBackend:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PPK2Backend:
-    """Real Nordic PPK2 over USB.
+    """Real Nordic PPK2 backend over USB serial.
 
-    Skeleton. Will be implemented when PPK2 hardware arrives (~May 24).
-    All stubs ``raise NotImplementedError`` with a message describing
-    exactly what they must do — so the import-switch flips cleanly and
-    fails informatively if invoked prematurely.
+    Lifecycle per ``measure_replica``:
 
-    Implementation outline (for the day PPK2 lands):
+      1. Open PPK2 over USB; read calibration modifiers.
+      2. Configure source-meter mode at the requested voltage.
+      3. Power on the DUT (STM32) via PPK2 VOUT.
+      4. Start measuring; drain loop reads samples + digital channels.
+      5. Write 4-column CSV: timestamp_us, current_uA, voltage_V, gpio_byte.
+      6. After ``duration_s``, stop, power off, disconnect.
 
-      1. Add ``ppk2-api`` to requirements (``pip install ppk2-api``).
-      2. ``__init__`` opens the PPK2 over USB serial:
-         ``self.ppk2 = PPK2_API(serial_port)``
-         ``self.ppk2.get_modifiers()``
-         ``self.ppk2.set_source_voltage(3300)``
-         ``self.ppk2.use_source_meter()``   # source-meter mode for active source
-      3. ``measure_replica`` mirrors MockBackend's lifecycle but with
-         PPK2 USB calls in place of TCP wire protocol.
-      4. The CSV writer assembles 4 columns: timestamp_us, current_uA,
-         voltage_V, gpio_byte. The PPK2 only directly returns
-         current+voltage; gpio_byte comes from a separate
-         ``gpio_logger.py`` thread reading lgpio events. Synchronize by
-         timestamp.
+    Wiring assumption:
+      - PPK2 VOUT -> STM32 3V3 (IDD jumper removed)
+      - PPK2 GND  -> STM32 GND
+      - PPK2 D0/D1/D2 (optional) -> STM32 PA0/PA1/PA4 GPIO triggers
+        gpio_byte = D2<<2 | D1<<1 | D0
 
-    Until then, instantiating this class succeeds but every method call
-    raises a clear error.
+    Note on sample rate:
+      The IRNAS ppk2-api 0.9.2 uses AVERAGE mode (~1 ksps output).
+      AVG_NUM_SET is marked "no-firmware" so the rate is not changeable
+      via this library. For ms-scale phases this is sufficient.
+
+    The ``gpio_source`` parameter is ignored: real hardware reads
+    digital channels directly via the PPK2's D0-D7 pins. Kept in the
+    signature so the orchestrator can pass it without branching.
     """
+
+    DEFAULT_VOLTAGE_MV = 3300
+    DEFAULT_SETTLE_S = 0.5
+    DRAIN_INTERVAL_S = 0.05  # 50 ms drain cadence
+    SAMPLE_PERIOD_US = 1000  # 1 ms = 1 ksps (PPK2 average mode)
 
     def __init__(
         self,
-        serial_port: str = "/dev/ttyACM0",
+        serial_port: str = "/dev/ttyACM1",
         *,
-        sample_rate_hz: int = 100_000,
+        voltage_mV: int = DEFAULT_VOLTAGE_MV,
+        settle_s: float = DEFAULT_SETTLE_S,
     ) -> None:
         self.serial_port = serial_port
-        self.sample_rate_hz = sample_rate_hz
+        self.voltage_mV = voltage_mV
+        self.settle_s = settle_s
 
     def measure_replica(
         self,
@@ -350,9 +357,117 @@ class PPK2Backend:
         gpio_source: str,
         log_dir: Path,
     ) -> MeasurementResult:
-        raise NotImplementedError(
-            "PPK2Backend.measure_replica is a initial development phase skeleton. "
-            "Implement using IRNAS ppk2-api (pip install ppk2-api) when "
-            "Nordic PPK2 hardware arrives. See class docstring for the "
-            "implementation outline."
+        # gpio_source is ignored - PPK2 reads digital channels directly
+        del gpio_source  # silence unused-warning
+
+        # Lazy import so module load doesn't require ppk2-api installed
+        try:
+            from ppk2_api.ppk2_api import PPK2_API
+        except ImportError as e:
+            return MeasurementResult(
+                ok=False, csv_path=csv_out, sample_count=0,
+                duration_actual_s=0.0,
+                error_message=f"ppk2-api not installed: {e}",
+            )
+
+        import csv as csv_mod
+
+        ppk2 = None
+        csv_fp = None
+        sample_count = 0
+        t_start = time.time()
+        err = ""
+        ppk2_log = log_dir / f"{csv_out.stem}.ppk2.log"
+
+        try:
+            log_fp = ppk2_log.open("w")
+            voltage_V = self.voltage_mV / 1000.0
+
+            # 1. Connect
+            log_fp.write(f"[{time.time():.3f}] Opening PPK2 at {self.serial_port}\n")
+            ppk2 = PPK2_API(self.serial_port, timeout=2, write_timeout=2)
+            ppk2.get_modifiers()
+            log_fp.write(f"[{time.time():.3f}] get_modifiers OK\n")
+
+            # 2. Configure
+            ppk2.set_source_voltage(self.voltage_mV)
+            ppk2.use_source_meter()
+            log_fp.write(f"[{time.time():.3f}] Source mode @ {self.voltage_mV} mV\n")
+
+            # 3. CSV setup
+            csv_fp = csv_out.open("w", encoding="utf-8", newline="")
+            writer = csv_mod.writer(csv_fp)
+            writer.writerow(["timestamp_us", "current_uA", "voltage_V", "gpio_byte"])
+
+            # 4. Power on, wait for STM32 to boot
+            ppk2.toggle_DUT_power("ON")
+            time.sleep(self.settle_s)
+            log_fp.write(f"[{time.time():.3f}] DUT powered, settled\n")
+
+            # 5. Start measuring
+            ppk2.start_measuring()
+            log_fp.write(f"[{time.time():.3f}] Measuring started\n")
+            cumulative_us = 0
+            t_end = time.time() + duration_s
+
+            # 6. Drain loop
+            while time.time() < t_end:
+                time.sleep(self.DRAIN_INTERVAL_S)
+                raw = ppk2.get_data()
+                if not raw:
+                    continue
+                samples_uA, digital_raw = ppk2.get_samples(raw)
+                if not samples_uA:
+                    continue
+
+                for i, current_uA in enumerate(samples_uA):
+                    if i < len(digital_raw):
+                        gpio_byte = digital_raw[i] & 0x07  # D0-D2 only
+                    else:
+                        gpio_byte = 0
+                    writer.writerow([
+                        cumulative_us + i * self.SAMPLE_PERIOD_US,
+                        f"{current_uA:.3f}",
+                        f"{voltage_V:.3f}",
+                        gpio_byte,
+                    ])
+                    sample_count += 1
+                cumulative_us += len(samples_uA) * self.SAMPLE_PERIOD_US
+
+            # Flush CSV before stop
+            csv_fp.flush()
+            log_fp.write(f"[{time.time():.3f}] Drained {sample_count} samples\n")
+
+            # 7. Stop
+            ppk2.stop_measuring()
+            ppk2.toggle_DUT_power("OFF")
+            log_fp.write(f"[{time.time():.3f}] Stopped, DUT off\n")
+            log_fp.close()
+
+        except Exception as e:
+            err = f"PPK2Backend error: {type(e).__name__}: {e}"
+        finally:
+            if csv_fp:
+                try:
+                    csv_fp.close()
+                except Exception:
+                    pass
+            if ppk2:
+                try:
+                    ppk2.toggle_DUT_power("OFF")
+                except Exception:
+                    pass
+
+        duration_actual = time.time() - t_start
+        ok = (sample_count > 0) and (not err)
+
+        if not ok and not err:
+            err = f"PPK2 produced {sample_count} samples; expected > 0"
+
+        return MeasurementResult(
+            ok=ok,
+            csv_path=csv_out,
+            sample_count=sample_count,
+            duration_actual_s=duration_actual,
+            error_message=err,
         )

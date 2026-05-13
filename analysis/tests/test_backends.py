@@ -27,20 +27,26 @@ def test_mock_backend_implements_protocol():
     assert callable(mb.measure_replica)
 
 
-def test_ppk2_backend_raises_not_implemented():
-    """PPK2Backend is a skeleton. Calling it before PPK2 arrives should
-    raise NotImplementedError with a helpful message."""
-    pb = PPK2Backend()
-    with pytest.raises(NotImplementedError) as excinfo:
-        pb.measure_replica(
-            csv_out=Path("/tmp/x.csv"),
-            duration_s=1.0,
-            gpio_source="fake-script:idle",
-            log_dir=Path("/tmp"),
-        )
-    msg = str(excinfo.value).lower()
-    assert "ppk2" in msg or "skeleton" in msg or "implement" in msg
+def test_ppk2_backend_constructs_and_has_real_method():
+    """PPK2Backend is now implemented. Verify it constructs with defaults,
+    and measure_replica is a real method (not raising NotImplementedError).
 
+    Does not run measure_replica here - that requires real hardware.
+    See scripts/smoke_ppk2.sh for hardware-in-the-loop validation."""
+    from measurement.backends import PPK2Backend
+
+    backend = PPK2Backend()
+    assert backend.serial_port == "/dev/ttyACM1"
+    assert backend.voltage_mV == 3300
+    assert backend.settle_s == 0.5
+
+    backend2 = PPK2Backend(serial_port="/dev/ttyACM2", voltage_mV=3000, settle_s=1.0)
+    assert backend2.serial_port == "/dev/ttyACM2"
+    assert backend2.voltage_mV == 3000
+    assert backend2.settle_s == 1.0
+
+    # measure_replica is callable (not raising NotImplementedError at attribute lookup)
+    assert callable(backend.measure_replica)
 
 def test_measurement_result_is_a_dataclass():
     """MeasurementResult is structured data, not a tuple."""
