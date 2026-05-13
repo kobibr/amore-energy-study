@@ -178,8 +178,10 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Parse PASS/FAIL counts from log
-PASS_COUNT=$(grep -c '^\[PASS\]' "${LOG_DIR}/ppk2_full.log" 2>/dev/null | tr -d ' \n' || echo 0)
-FAIL_COUNT=$(grep -c '^\[FAIL\]' "${LOG_DIR}/ppk2_full.log" 2>/dev/null | tr -d ' \n' || echo 0)
+PASS_COUNT=$(grep -c "^\[PASS\]" "${LOG_DIR}/ppk2_full.log" 2>/dev/null)
+FAIL_COUNT=$(grep -c "^\[FAIL\]" "${LOG_DIR}/ppk2_full.log" 2>/dev/null)
+PASS_COUNT="${PASS_COUNT:-0}"
+FAIL_COUNT="${FAIL_COUNT:-0}"
 
 echo -e "  ${GRN}${PASS_COUNT} PASS${RST}  ${RED}${FAIL_COUNT} FAIL${RST}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
