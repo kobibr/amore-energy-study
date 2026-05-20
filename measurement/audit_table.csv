@@ -1,0 +1,20 @@
+category,claim,value,unit,source,status,notes
+electrical,I @ 3.0V active,103.67 ± 19.42,mA,voltage_20260520_143324.txt,measured,
+electrical,P @ 3.0V active,311.01,mW,voltage_20260520_143324.txt,measured,
+electrical,I @ 3.3V active,138.71 ± 25.01,mA,voltage_20260520_143324.txt,measured,
+electrical,P @ 3.3V active,457.73,mW,voltage_20260520_143324.txt,measured,
+electrical,I @ 3.6V active,145.28 ± 26.64,mA,voltage_20260520_143324.txt,measured,
+electrical,P @ 3.6V active,523.01,mW,voltage_20260520_143324.txt,measured,
+electrical,I @ 3.3V active,143.80 ± 25.27,mA,voltage_20260520_144105.txt,measured,
+electrical,P @ 3.3V active,474.54,mW,voltage_20260520_144105.txt,measured,
+metrology,Calibration evidence on file,present,,calibration_20260520_113657_R33.txt,measured,See file for resistor value + ratio
+compute,amort/round @ N=1,872.0,ms,stm_report_20260520_122139.txt,measured,146491372 cycles @ 168MHz
+compute,amort/round @ N=10,—,ms,stm_report_20260520_122139.txt,pending,batch incomplete in this run
+compute,amort/round @ N=50,—,ms,stm_report_20260520_122139.txt,pending,batch incomplete in this run
+compute,One-time setup,1193.6,ms,stm_report_20260520_122139.txt,measured,
+comm,"Comm energy per round (AmorE, BLE_nRF52840)",0.194,mJ,comm_projection.py (datasheet),computed,constant across N
+comm,"Comm energy N=50 (Direct, BLE_nRF52840)",4.009,mJ,comm_projection.py (datasheet),computed,
+comm,Comm-only crossover N (BLE_nRF52840),2.42,pairings,comm_projection.py (datasheet),computed,
+comm,"Comm energy per round (AmorE, LoRa_SX1276_SF7)",135.291,mJ,comm_projection.py (datasheet),computed,constant across N
+comm,"Comm energy N=50 (Direct, LoRa_SX1276_SF7)",2404.668,mJ,comm_projection.py (datasheet),computed,
+comm,Comm-only crossover N (LoRa_SX1276_SF7),2.81,pairings,comm_projection.py (datasheet),computed,
