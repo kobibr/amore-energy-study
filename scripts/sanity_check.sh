@@ -193,7 +193,26 @@ head_ "════════════════════════�
 
 SMOKE_LOG=/tmp/sanity_smoke_$(date +%Y%m%d_%H%M%S).log
 SMOKE_START=$(date +%s)
-if bash scripts/smoke_ppk2.sh > "${SMOKE_LOG}" 2>&1; then
+
+# Check if a long-running sweep already owns the PPK2 — if so, smoke
+# would just collide on USB. Skipping is the correct outcome here:
+# we cannot test PPK2 health, but we also can't FAIL on hardware
+# we voluntarily made unavailable. Marked SKIPPED(busy) in the log.
+SWEEP_PIDFILE=/tmp/sweep_n61.pid
+SWEEP_BUSY=0
+if [ -f "${SWEEP_PIDFILE}" ]; then
+    SWEEP_PID=$(cat "${SWEEP_PIDFILE}")
+    if kill -0 "${SWEEP_PID}" 2>/dev/null; then
+        SWEEP_BUSY=1
+    fi
+fi
+
+if [ "${SWEEP_BUSY}" -eq 1 ]; then
+    SMOKE_RESULT="SKIPPED-BUSY"
+    warn "smoke_ppk2: SKIPPED — sweep is running (PID ${SWEEP_PID}) and owns the PPK2"
+    info "  This is expected during a long sweep; rerun sanity_check after sweep completes"
+    info "  for a full PPK2 hardware check."
+elif bash scripts/smoke_ppk2.sh > "${SMOKE_LOG}" 2>&1; then
     SMOKE_RESULT="PASS"
     ok "smoke_ppk2: PASS"
 else
@@ -236,7 +255,7 @@ head_ "════════════════════════�
 head_ "  Summary"
 head_ "════════════════════════════════════════════════════════════════"
 
-if [ "${SMOKE_RESULT}" = "PASS" ] && [ "${REGR_RESULT}" != "FAIL" ]; then
+if [ "${SMOKE_RESULT}" != "FAIL" ] && [ "${REGR_RESULT}" != "FAIL" ]; then
     STAMP_NOW=$(date '+%Y-%m-%d %H:%M:%S')
     LINE="${STAMP_NOW} | outer=${OUTER_LOCAL:0:7} | fw=${SUB_LOCAL:0:7} | smoke=${SMOKE_RESULT}(${SMOKE_DUR}s) regr=${REGR_RESULT}(${REGR_DUR}s)"
     
@@ -278,11 +297,14 @@ INIT_EOF
 else
     big_fail "ONE OR MORE TESTS FAILED"
     echo -e "${RED}  Results:${RST}"
-    if [ "${SMOKE_RESULT}" = "PASS" ]; then
-        echo -e "    smoke_ppk2:      ${GRN}PASS${RST}"
-    else
-        echo -e "    smoke_ppk2:      ${RED}${BOLD}${SMOKE_RESULT}${RST}"
-    fi
+    case "${SMOKE_RESULT}" in
+        PASS)
+            echo -e "    smoke_ppk2:      ${GRN}PASS${RST}" ;;
+        SKIPPED-BUSY)
+            echo -e "    smoke_ppk2:      ${YLW}SKIPPED (sweep running)${RST}" ;;
+        *)
+            echo -e "    smoke_ppk2:      ${RED}${BOLD}${SMOKE_RESULT}${RST}" ;;
+    esac
     if [ "${REGR_RESULT}" = "PASS" ]; then
         echo -e "    mini_regression: ${GRN}PASS${RST}"
     elif [ "${REGR_RESULT}" = "SKIPPED" ]; then
