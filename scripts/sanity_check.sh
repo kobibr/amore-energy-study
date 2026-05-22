@@ -94,7 +94,10 @@ echo
 # ─────────────────────────────────────────────────────────────────────
 head_ "━━━ Gate 1/4: outer repo clean ━━━"
 
-OUTER_DIRTY=$(git status --porcelain | grep -v '^?? ' | wc -l)
+# Exclude measurement/sanity_log.txt — it's the OUTPUT of this script,
+# committed at the end of every PASS. Counting it would make the gate
+# self-defeating after the first PASS.
+OUTER_DIRTY=$(git status --porcelain | grep -v '^?? ' | grep -v 'measurement/sanity_log.txt' | wc -l)
 if [ "${OUTER_DIRTY}" -gt 0 ] && [ "${FORCE}" -eq 0 ]; then
     big_fail "OUTER REPO HAS UNCOMMITTED CHANGES (${OUTER_DIRTY} files)"
     echo -e "${RED}  Uncommitted files:${RST}"
@@ -252,6 +255,19 @@ INIT_EOF
     echo "${LINE}" >> "${LOG_FILE}"
     ok "Sanity PASS recorded:"
     info "  ${LINE}"
+
+    # Auto-commit + push the log so the next sanity run sees a clean tree
+    info "Auto-committing sanity_log update..."
+    if git add "${LOG_FILE}" 2>/dev/null && \
+       git commit -m "sanity_check: PASS at ${STAMP_NOW} (outer=${OUTER_LOCAL:0:7})" >/dev/null 2>&1; then
+        if git push origin main >/dev/null 2>&1; then
+            ok "Auto-pushed sanity_log update"
+        else
+            warn "Auto-push failed (offline?) — commit is local only"
+        fi
+    else
+        warn "Auto-commit skipped (no changes? gate already excluded log)"
+    fi
     
     big_pass
     info "  This commit is provably-working."

@@ -4,3 +4,4 @@
 # Refusal to run if working tree is dirty or local != remote ensures every
 # entry maps to a reproducible, pushed commit pair.
 #
+2026-05-22 14:10:05 | outer=a0c4747 | fw=fdb30fd | smoke=PASS(2s) regr=SKIPPED(0s)
