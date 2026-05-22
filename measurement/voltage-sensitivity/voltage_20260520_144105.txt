@@ -1,0 +1,13 @@
+Voltage-sensitivity Sweep Report
+================================================================
+Timestamp:  2026-05-20T14:41:05.780384
+Voltages:   [3300] mV
+Duration:   3.0s per V (skip first 1.0s)
+Pattern:    fresh PPK2 instance per voltage, 3.0s inter-voltage sleep
+Nominal:    3300 mV (I=143.800 mA, P=474.540 mW)
+
+  V (mV)       I (mA)      CV      P (mW)       %ΔI       %ΔP    neg
+-----------------------------------------------------------------
+    3300   143.80±25.27   17.6%     474.540    +0.00%    +0.00%      0
+
+✓ Sweep completed without safety abort.

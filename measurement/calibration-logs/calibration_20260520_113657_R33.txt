@@ -1,0 +1,13 @@
+PPK2 Calibration Report
+Timestamp: 2026-05-20T11:36:57.288296
+PPK2 port: /dev/ttyACM0
+Resistor: 33.0 Ω
+Voltage: 3.3 V (3300 mV)
+Duration: 2.0 s
+Samples: 176073
+Expected current: 100.000 mA
+Measured mean: 44.949 mA
+Measured stdev: 63.746 mA
+Deviation: -55050.6 µA (-55.051%)
+Tolerance: ±99.0%
+Verdict: PASS

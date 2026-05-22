@@ -1,0 +1,13 @@
+Voltage-sensitivity Sweep Report
+============================================================
+Timestamp:  2026-05-20T13:32:56.050577
+Voltages:   [3000, 3300, 3600] mV
+Duration:   4.0s per V (skipped first 1.5s)
+Nominal:    3300 mV (I=3404.149 mA, P=11233.691 mW)
+
+  V (mV)      I (mA)      P (mW)       %ΔI       %ΔP
+------------------------------------------------------------
+    3000     169.064     507.193   -95.03%   -95.49%
+    3300    3404.149   11233.691    +0.00%    +0.00%
+
+⚠ SWEEP ABORTED for safety (current > 200.0 mA at some voltage).
