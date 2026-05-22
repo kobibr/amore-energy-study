@@ -5,3 +5,4 @@
 # entry maps to a reproducible, pushed commit pair.
 #
 2026-05-22 14:10:05 | outer=a0c4747 | fw=fdb30fd | smoke=PASS(2s) regr=SKIPPED(0s)
+2026-05-22 14:18:14 | outer=466b970 | fw=fdb30fd | smoke=PASS(3s) regr=SKIPPED(0s)
