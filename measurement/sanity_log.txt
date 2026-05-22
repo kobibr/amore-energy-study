@@ -1,0 +1,6 @@
+# Sanity check audit log
+# Each line records a successful end-to-end pass of sanity_check.sh
+# Format: TIMESTAMP | outer=SHA | firmware=SHA | mini_regr=PASS | smoke_ppk2=PASS | duration=XmYs
+# Refusal to run if working tree is dirty or local != remote ensures every
+# entry maps to a reproducible, pushed commit pair.
+#
