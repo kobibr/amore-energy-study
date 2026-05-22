@@ -1,0 +1,220 @@
+
+[1m[94m══ STEP 1: Build ══[0m
+[96m  Cleaning build directory (paranoid mode)...[0m
+[96m  Build log: logs/build_20260522_214655.log[0m
+-- RELIC found at /home/kobi/amore-energy-study/firmware/amore-fw/relic_install — relic_bench.elf target enabled
+-- regression_test.elf target enabled
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/kobi/amore-energy-study/firmware/amore-fw/build/bls12_381
+[100%] Built target amore_bls12_381.elf
+RELIC bench: generating HEX and BIN
+   text	   data	    bss	    dec	    hex	filename
+ 258356	    116	  54188	 312660	  4c554	/home/kobi/amore-energy-study/firmware/amore-fw/build/bls12_381/relic_bench.elf
+[100%] Built target relic_bench.elf
+[92m✓[0m Build complete: build/bls12_381/amore_bls12_381.elf
+
+[1m[94m══ STEP 2: Flash ══[0m
+scripts/run_benchmark.sh: line 189: [: 
+[1m[94m-1[0m: integer expression expected
+[96m  Flash method requested: auto[0m
+[96m  Flash method resolved : rpi_swd[0m
+[96m  Starting PPK2 source mode @ 3300mV...[0m
+[PPK2] ON
+[92m✓[0m PPK2 powering STM32 (PID 736273)
+[96m  Transferring ELF to RPi: amore_bls12_381.elf[0m
+[96m  Flashing via RPi GPIO SWD...[0m
+Open On-Chip Debugger 0.12.0+dev-snapshot (2025-07-16-14:06)
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : BCM2835 GPIO JTAG/SWD bitbang driver
+Info : clock speed 1989 kHz
+Info : SWD DPIDR 0x2ba01477
+Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected
+Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints
+Info : [stm32f4x.cpu] Examination succeed
+Info : [stm32f4x.cpu] starting gdb server on 3333
+Info : Listening on port 3333 for gdb connections
+[stm32f4x.cpu] halted due to debug-request, current mode: Thread 
+xPSR: 0x01000000 pc: 0x08004250 msp: 0x20020000
+[stm32f4x.cpu] halted due to debug-request, current mode: Thread 
+xPSR: 0x01000000 pc: 0x08004250 msp: 0x20020000
+** Programming Started **
+Info : device id = 0x101f6413
+Info : flash size = 1024 KiB
+** Programming Finished **
+** Verify Started **
+** Verified OK **
+** Resetting Target **
+shutdown command invoked
+[92m✓[0m Flash done via RPi GPIO SWD
+[96m  STM32 booting[0m
+
+[1m[94m══ STEP 3: Start server on Raspberry Pi ══[0m
+[96m  Using manual override: RPI_HOST=10.164.56.169[0m
+[96m  RPi pre-flight: pi@10.164.56.169[0m
+[92m✓[0m RPi pre-flight OK
+[96m  RPi host       : pi@10.164.56.169[0m
+[96m  RPi port       : /dev/ttyAMA0 @ 921600 baud[0m
+[96m  Honest rounds  : 61  (N=1 + N=10 + N=50)[0m
+[96m  Server log     : logs/server_20260522_214655.log[0m
+
+[96m  Using server.py from ~/amore-bn254-cortex-m4/rpi on the RPi[0m
+[96m  Server running on RPi (local PID=736361) — waiting for all rounds...[0m
+
+
+[1m[94m============================================================[0m
+[1m[94m  AmorE BLS12-381 Server  —  telemetry build[0m
+[1m[94m============================================================[0m
+[90m[20:47:20.389][0m [96m  Port: /dev/ttyAMA0  Baud: 921600[0m
+[90m[20:47:20.389][0m [96m  Honest rounds before malicious switch: 61[0m
+[90m[20:47:20.389][0m [96m  Log directory: /home/pi[0m
+
+[90m[20:47:20.690][0m [96m  Sending CMD_READY (mode=honest)[0m
+
+[90m[20:47:20.691][0m [1m[94m── Round 1 ── waiting for CMD_SETUP...[0m
+[90m[20:47:22.400][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:48:49.800][0m [96m  Compute done in 87399.1 ms[0m
+[90m[20:48:49.820][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:48:50.229][0m [92m✓ Honest round 1: accepted by client  (compute=87399.1 ms  rtt=410 ms)[0m
+
+[90m[20:48:50.230][0m [1m[94m── Round 2 ── waiting for CMD_SETUP...[0m
+[90m[20:48:50.734][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:50:18.225][0m [96m  Compute done in 87490.8 ms[0m
+[90m[20:50:18.244][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:50:18.643][0m [92m✓ Honest round 2: accepted by client  (compute=87490.8 ms  rtt=399 ms)[0m
+
+[90m[20:50:18.643][0m [1m[94m── Round 3 ── waiting for CMD_SETUP...[0m
+[90m[20:50:19.145][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:51:46.302][0m [96m  Compute done in 87157.0 ms[0m
+[90m[20:51:46.324][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:51:46.750][0m [92m✓ Honest round 3: accepted by client  (compute=87157.0 ms  rtt=427 ms)[0m
+
+[90m[20:51:46.751][0m [1m[94m── Round 4 ── waiting for CMD_SETUP...[0m
+[90m[20:51:47.252][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:53:14.621][0m [96m  Compute done in 87368.4 ms[0m
+[90m[20:53:14.640][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:53:15.060][0m [92m✓ Honest round 4: accepted by client  (compute=87368.4 ms  rtt=420 ms)[0m
+
+[90m[20:53:15.060][0m [1m[94m── Round 5 ── waiting for CMD_SETUP...[0m
+[90m[20:53:15.546][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:54:42.884][0m [96m  Compute done in 87337.3 ms[0m
+[90m[20:54:42.904][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:54:43.304][0m [92m✓ Honest round 5: accepted by client  (compute=87337.3 ms  rtt=400 ms)[0m
+
+[90m[20:54:43.305][0m [1m[94m── Round 6 ── waiting for CMD_SETUP...[0m
+[90m[20:54:43.795][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:56:11.221][0m [96m  Compute done in 87425.9 ms[0m
+[90m[20:56:11.240][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:56:11.635][0m [92m✓ Honest round 6: accepted by client  (compute=87425.9 ms  rtt=396 ms)[0m
+
+[90m[20:56:11.636][0m [1m[94m── Round 7 ── waiting for CMD_SETUP...[0m
+[90m[20:56:12.133][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:57:39.579][0m [96m  Compute done in 87445.6 ms[0m
+[90m[20:57:39.600][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:57:40.018][0m [92m✓ Honest round 7: accepted by client  (compute=87445.6 ms  rtt=418 ms)[0m
+
+[90m[20:57:40.019][0m [1m[94m── Round 8 ── waiting for CMD_SETUP...[0m
+[90m[20:57:40.521][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[20:59:08.020][0m [96m  Compute done in 87499.0 ms[0m
+[90m[20:59:08.040][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[20:59:08.456][0m [92m✓ Honest round 8: accepted by client  (compute=87499.0 ms  rtt=417 ms)[0m
+
+[90m[20:59:08.457][0m [1m[94m── Round 9 ── waiting for CMD_SETUP...[0m
+[90m[20:59:08.958][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[21:00:36.474][0m [96m  Compute done in 87515.2 ms[0m
+[90m[21:00:36.492][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[21:00:36.898][0m [92m✓ Honest round 9: accepted by client  (compute=87515.2 ms  rtt=406 ms)[0m
+
+[90m[21:00:36.898][0m [1m[94m── Round 10 ── waiting for CMD_SETUP...[0m
+[90m[21:00:37.418][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[21:02:04.919][0m [96m  Compute done in 87501.4 ms[0m
+[90m[21:02:04.940][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[21:02:05.362][0m [92m✓ Honest round 10: accepted by client  (compute=87501.4 ms  rtt=422 ms)[0m
+
+[90m[21:02:05.363][0m [1m[94m── Round 11 ── waiting for CMD_SETUP...[0m
+[90m[21:02:05.850][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[21:03:33.199][0m [96m  Compute done in 87349.3 ms[0m
+[90m[21:03:33.220][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[21:03:33.620][0m [92m✓ Honest round 11: accepted by client  (compute=87349.3 ms  rtt=400 ms)[0m
+
+[90m[21:03:33.620][0m [1m[94m── Round 12 ── waiting for CMD_SETUP...[0m
+[90m[21:03:34.120][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[21:05:01.495][0m [96m  Compute done in 87375.5 ms[0m
+[90m[21:05:01.516][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[21:05:01.925][0m [92m✓ Honest round 12: accepted by client  (compute=87375.5 ms  rtt=410 ms)[0m
+
+[90m[21:05:01.926][0m [1m[94m── Round 13 ── waiting for CMD_SETUP...[0m
+[90m[21:05:02.429][0m [96m  Mode: [92mhonest[0m  |  Computing pairings...[0m
+[90m[21:06:29.805][0m [96m  Compute done in 87375.7 ms[0m
+[90m[21:06:29.824][0m [96m  CMD_RESULT sent (1152 bytes)[0m
+[90m[21:07:29.903][0m [93m⚠ Round 13: no STATUS within 60s[0m
+
+[90m[21:07:29.904][0m [1m[94m── Round 14 ── waiting for CMD_SETUP...[0m
+[90m[21:09:30.063][0m [93m⚠ No more packets for 120s — assuming benchmark complete.[0m
+
+[1m[94m============================================================[0m
+[1m[94m  SERVER REPORT[0m
+[1m[94m============================================================[0m
+  Start : 2026-05-22T20:47:20
+  End   : 2026-05-22T21:09:30
+  Port  : /dev/ttyAMA0 @ 921600 baud
+
+[1m[94m  Rounds[0m
+  Total sent by client : 13
+  Honest : [92m✓ 12/12 accepted[0m
+  Malicious : [93m⚠ no malicious round received[0m
+
+[1m[94m  Errors[0m
+  CRC errors    : 0
+  Timeout errors: 1
+  Bad CMD       : 0
+  Bad length    : 0
+
+[1m[94m  Performance[0m
+  Avg server pairing compute : 87403.1 ms / round
+
+[1m[94m  Per-round summary[0m
+    #  Mode             Compute    Client  Status      
+  ───  ────────────  ──────────  ────────  ────────────
+    1  honest          87399.1ms  [92m      OK[0m  
+    2  honest          87490.8ms  [92m      OK[0m  
+    3  honest          87157.0ms  [92m      OK[0m  
+    4  honest          87368.4ms  [92m      OK[0m  
+    5  honest          87337.3ms  [92m      OK[0m  
+    6  honest          87425.9ms  [92m      OK[0m  
+    7  honest          87445.6ms  [92m      OK[0m  
+    8  honest          87499.0ms  [92m      OK[0m  
+    9  honest          87515.2ms  [92m      OK[0m  
+   10  honest          87501.4ms  [92m      OK[0m  
+   11  honest          87349.3ms  [92m      OK[0m  
+   12  honest          87375.5ms  [92m      OK[0m  
+   13  honest          87375.7ms  [93mno-status[0m  
+
+[1m[94m[91m✗ ISSUES DETECTED — see details above[0m[0m
+[1m[94m============================================================[0m
+
+[90m[21:09:30.071][0m [96m  JSON log saved → ./amore_server_20260522_210930.json[0m
+
+[92m✓[0m Server exited — benchmark complete.
+
+[1m[94m══ STEP 4: STM32 telemetry dump via GDB ══[0m
+[96m  GDB_CMD  : gdb-multiarch[0m
+[96m  openocd  : /usr/bin/openocd[0m
+[96m  ELF      : build/bls12_381/amore_bls12_381.elf[0m
+
+[92m✓[0m GDB found: gdb-multiarch
+[92m✓[0m OpenOCD found: /usr/bin/openocd
+[92m✓[0m ELF exists: build/bls12_381/amore_bls12_381.elf
+
+[96m  Using RPi as remote OpenOCD for GDB[0m
+[96m  Running GDB...[0m
+
+	http://openocd.org/doc/doxygen/bugs.html
+DEPRECATED! use 'gdb port', not 'gdb_port'
+/tmp/amore_gdb_6IR6.gdb:4: Error in sourced command file:
+Remote connection closed
+[96m  Stopping PPK2...[0m
+[PPK2] OFF
+[91m✗[0m Script exited with code 1

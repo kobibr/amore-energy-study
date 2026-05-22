@@ -139,3 +139,31 @@ status:
 - `computed`: derived from datasheets or models
 - `pending`: not yet measured (do NOT cite)
 
+
+## RUNTIME ANOMALIES (observed but not understood)
+
+### R1. STM32 silent after ~12 rounds in HONEST_ROUNDS=61 sweep
+
+**Observed:** 2026-05-22 21:46 — sweep ran for 12 honest rounds at
+~87s/round, then Round 13 STM32 did not send CMD_SETUP within the
+server's 60s timeout. The sweep then aborted at the GDB telemetry
+stage with "Remote connection closed".
+
+**Suspect causes (untested):**
+- Thermal: ~17 minutes of continuous pairing computation may warm
+  the Vcore regulator past its quiescent point, drifting the clock
+  or upsetting Flash wait-state timing.
+- Cycle counter overflow: DWT_CYCCNT at 168 MHz wraps every ~25 s.
+  If the firmware accumulates cycle counts without correctly handling
+  overflow, the per-round metric may corrupt after many rounds.
+- Server-side memory: py_ecc may retain state across rounds; not
+  yet profiled.
+- Random UART glitch (single-shot, not periodic).
+
+**Workaround in this report:** HONEST_ROUNDS=12 is the longest
+verified clean run as of this writing. Mean compute time appears
+stable at ~87s with <1% drift across 12 rounds, so the data is
+usable. Reproducing N=10/N=50 amort/round numbers requires only
+12+ rounds successfully completed at each N, so this caveat does
+NOT block the audit_table.
+
