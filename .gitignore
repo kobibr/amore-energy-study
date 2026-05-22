@@ -42,3 +42,19 @@ status_report.txt
 venv/
 .vscode/
 # Workspace backups (e.g. .before-O3-doc) — never committed
+
+# mini_regression auto-saves PNGs to /figures/ — not for the paper
+# (the paper uses report/figures/ which is committed)
+/figures/
+
+# pdflatex build artifacts (we DO commit main.pdf as the deliverable)
+report/main.aux
+report/main.log
+report/main.out
+report/main.toc
+report/*.synctex.gz
+
+# main.tex backups (transient, kept in git history)
+report/main.tex.before_*
+report/main.tex.bak
+
