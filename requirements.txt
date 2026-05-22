@@ -1,0 +1,34 @@
+# AmorE Energy Study — Python dependencies for analysis pipeline
+#
+# Install:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# This file pins the dependencies used by the analysis modules.
+# RPi-side dependencies are listed at the bottom under "RPi pipeline".
+
+# Core data + numerics
+numpy>=1.24,<2.0
+scipy>=1.10,<2.0
+pandas>=2.0,<3.0
+
+# Plotting
+matplotlib>=3.7,<4.0
+
+# PPK2 instrumentation
+ppk2-api>=0.9
+
+# CSV / serialization helpers
+pyyaml>=6.0
+
+# Testing
+pytest>=7.0,<9.0
+pytest-cov>=4.0
+
+# ─────────────────────────────────────────────────────────────────────
+# RPi-side dependencies (install on the Raspberry Pi server, not here)
+# ─────────────────────────────────────────────────────────────────────
+# Install on RPi with: pip install py_ecc==6.0.0 pyserial==3.5
+#   py_ecc==6.0.0   — BLS12-381 pairing reference for the server
+#   pyserial==3.5   — UART communication with STM32

@@ -155,6 +155,13 @@ silently making pairing 2.14$\times$ slower than the $-O3$ binary
 expected by the analysis pipeline.
 
 
+The current verified ELF fingerprint at the time of this writing
+is SHA256 \texttt{7ae61f58a12bcd6f...}, with \texttt{.text}~$=$~22084\,B
+and \texttt{.bss}~$=$~35984\,B. Any deviation indicates either
+a compiler-flag drift (e.g.\ accidental $-O2$) or instrumentation
+change; the build halts in that case.
+
+
 
 \section{Methodology}
 \label{sec:method}
