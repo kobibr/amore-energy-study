@@ -32,10 +32,38 @@ cd "${ES}"
 RED='\033[91m'; GRN='\033[92m'; YLW='\033[93m'
 BLU='\033[94m'; CYN='\033[96m'; RST='\033[0m'; BOLD='\033[1m'
 ok()    { echo -e "${GRN}✓${RST} $*"; }
-fail()  { echo -e "${RED}✗${RST} $*"; }
+fail()  { echo -e "${RED}${BOLD}✗ FAIL:${RST} ${RED}$*${RST}"; }
 warn()  { echo -e "${YLW}⚠${RST} $*"; }
 info()  { echo -e "${CYN}  $*${RST}"; }
 head_() { echo -e "\n${BOLD}${BLU}$*${RST}"; }
+
+# LOUD FAIL banner — impossible to miss
+big_fail() {
+    local msg="$1"
+    echo
+    echo -e "${RED}${BOLD}"
+    echo "  ██████████████████████████████████████████████████████████████"
+    echo "  ██                                                          ██"
+    echo "  ██   ✗✗✗  S A N I T Y   C H E C K   F A I L E D  ✗✗✗       ██"
+    echo "  ██                                                          ██"
+    echo "  ██████████████████████████████████████████████████████████████"
+    echo -e "${RST}"
+    echo -e "${RED}${BOLD}  >>>  ${msg}  <<<${RST}"
+    echo
+    echo -e "${RED}${BOLD}  ▼▼▼  See details above  ▼▼▼${RST}"
+    echo
+}
+
+big_pass() {
+    echo
+    echo -e "${GRN}${BOLD}"
+    echo "  ╔══════════════════════════════════════════════════════════╗"
+    echo "  ║                                                          ║"
+    echo "  ║      ✓  S A N I T Y   C H E C K   P A S S E D  ✓        ║"
+    echo "  ║                                                          ║"
+    echo "  ╚══════════════════════════════════════════════════════════╝"
+    echo -e "${RST}"
+}
 
 # ── Parse flags ──────────────────────────────────────────────────────
 SMOKE_ONLY=0
@@ -68,11 +96,16 @@ head_ "━━━ Gate 1/4: outer repo clean ━━━"
 
 OUTER_DIRTY=$(git status --porcelain | grep -v '^?? ' | wc -l)
 if [ "${OUTER_DIRTY}" -gt 0 ] && [ "${FORCE}" -eq 0 ]; then
-    fail "Outer repo has ${OUTER_DIRTY} uncommitted changes"
-    git status -s | head -10 | sed 's/^/    /'
+    big_fail "OUTER REPO HAS UNCOMMITTED CHANGES (${OUTER_DIRTY} files)"
+    echo -e "${RED}  Uncommitted files:${RST}"
+    git status -s | head -10 | sed 's/^/      /'
     echo
-    fail "Commit or stash before running sanity_check"
-    fail "  (use --force to skip git gates, e.g. during initial setup)"
+    echo -e "${YLW}${BOLD}  TO FIX:${RST}"
+    echo -e "${YLW}    git add <files>${RST}"
+    echo -e "${YLW}    git commit -m \"...\"${RST}"
+    echo -e "${YLW}    git push origin main${RST}"
+    echo -e "${YLW}  Or to bypass (NOT recommended): bash $0 --force${RST}"
+    echo
     exit 1
 fi
 [ "${FORCE}" -eq 1 ] && warn "--force: skipping outer clean check" || ok "Outer repo clean"
@@ -87,10 +120,13 @@ OUTER_LOCAL=$(git rev-parse HEAD)
 OUTER_REMOTE=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
 
 if [ "${OUTER_LOCAL}" != "${OUTER_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
-    fail "Local outer HEAD does not match origin/main"
-    info "  local:  ${OUTER_LOCAL:0:7}"
-    info "  remote: ${OUTER_REMOTE:0:7}"
-    fail "Run: git push origin main"
+    big_fail "OUTER REPO NOT PUSHED TO REMOTE"
+    echo -e "${RED}  local:  ${OUTER_LOCAL:0:7}${RST}"
+    echo -e "${RED}  remote: ${OUTER_REMOTE:0:7}${RST}"
+    echo
+    echo -e "${YLW}${BOLD}  TO FIX:${RST}"
+    echo -e "${YLW}    git push origin main${RST}"
+    echo
     exit 1
 fi
 [ "${FORCE}" -eq 1 ] && warn "--force: skipping outer push check" || ok "Outer pushed (${OUTER_LOCAL:0:7})"
@@ -105,8 +141,19 @@ SUB_DIRTY=$(git status --porcelain | grep -v '^?? ' | wc -l)
 SUB_LOCAL=$(git rev-parse HEAD)
 
 if [ "${SUB_DIRTY}" -gt 0 ] && [ "${FORCE}" -eq 0 ]; then
-    fail "Submodule has ${SUB_DIRTY} uncommitted changes"
-    git status -s | head -10 | sed 's/^/    /'
+    big_fail "FIRMWARE SUBMODULE HAS UNCOMMITTED CHANGES (${SUB_DIRTY} files)"
+    echo -e "${RED}  Uncommitted files in firmware/amore-fw:${RST}"
+    git status -s | head -10 | sed 's/^/      /'
+    echo
+    echo -e "${YLW}${BOLD}  TO FIX:${RST}"
+    echo -e "${YLW}    cd firmware/amore-fw${RST}"
+    echo -e "${YLW}    git add <files>${RST}"
+    echo -e "${YLW}    git commit -m \"...\"${RST}"
+    echo -e "${YLW}    git push origin main${RST}"
+    echo -e "${YLW}    cd ../..${RST}"
+    echo -e "${YLW}    git add firmware/amore-fw${RST}"
+    echo -e "${YLW}    git commit -m \"Bump firmware\"${RST}"
+    echo
     popd >/dev/null
     exit 1
 fi
@@ -121,10 +168,13 @@ git fetch --quiet origin main 2>/dev/null || warn "fetch failed (offline?)"
 SUB_REMOTE=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
 
 if [ "${SUB_LOCAL}" != "${SUB_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
-    fail "Submodule local HEAD does not match origin/main"
-    info "  local:  ${SUB_LOCAL:0:7}"
-    info "  remote: ${SUB_REMOTE:0:7}"
-    fail "Run: cd firmware/amore-fw && git push origin main"
+    big_fail "FIRMWARE SUBMODULE NOT PUSHED TO REMOTE"
+    echo -e "${RED}  local:  ${SUB_LOCAL:0:7}${RST}"
+    echo -e "${RED}  remote: ${SUB_REMOTE:0:7}${RST}"
+    echo
+    echo -e "${YLW}${BOLD}  TO FIX:${RST}"
+    echo -e "${YLW}    cd firmware/amore-fw && git push origin main && cd ../..${RST}"
+    echo
     popd >/dev/null
     exit 1
 fi
@@ -203,16 +253,29 @@ INIT_EOF
     ok "Sanity PASS recorded:"
     info "  ${LINE}"
     
-    echo
-    head_ "${GRN}${BOLD}  ✓ SANITY CHECK PASSED${RST}"
+    big_pass
     info "  This commit is provably-working."
     info "  Logged to: ${LOG_FILE}"
+    info "  Last 3 PASS entries:"
+    tail -3 "${LOG_FILE}" | grep -v "^#" | sed 's/^/    /'
     exit 0
 else
+    big_fail "ONE OR MORE TESTS FAILED"
+    echo -e "${RED}  Results:${RST}"
+    if [ "${SMOKE_RESULT}" = "PASS" ]; then
+        echo -e "    smoke_ppk2:      ${GRN}PASS${RST}"
+    else
+        echo -e "    smoke_ppk2:      ${RED}${BOLD}${SMOKE_RESULT}${RST}"
+    fi
+    if [ "${REGR_RESULT}" = "PASS" ]; then
+        echo -e "    mini_regression: ${GRN}PASS${RST}"
+    elif [ "${REGR_RESULT}" = "SKIPPED" ]; then
+        echo -e "    mini_regression: ${YLW}SKIPPED (--smoke)${RST}"
+    else
+        echo -e "    mini_regression: ${RED}${BOLD}${REGR_RESULT}${RST}"
+    fi
     echo
-    head_ "${RED}${BOLD}  ✗ SANITY CHECK FAILED${RST}"
-    info "  smoke_ppk2:      ${SMOKE_RESULT}"
-    info "  mini_regression: ${REGR_RESULT}"
-    info "  NOT recorded to ${LOG_FILE} (only PASSes are logged)"
+    echo -e "${YLW}  NOT recorded to ${LOG_FILE} (only PASSes are logged)${RST}"
+    echo
     exit 1
 fi
