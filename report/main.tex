@@ -418,6 +418,46 @@ The energy crossover under duty-cycle scenarios depends on the
 relative cost of ServerWait sleep vs active compute. [Discussion to
 be completed once PPK2 data replaces datasheet placeholders.]
 
+
+\paragraph{Practical recommendations.}
+The measurements above point to a clear ordering of engineering
+priorities for an AmorE-on-MCU deployment. First, move ServerWait
+off the active-power floor: enter Cortex-M4 Stop mode (or, at
+minimum, WFI with peripheral clocks gated) while waiting for the
+helper. Without this, the per-round wait-energy dominates the
+batch budget and prevents AmorE from ever beating direct pairing
+(Fig.~\ref{fig:energy}, Fig.~\ref{fig:phases}). Second, on the
+compute side, BN254 is already close to direct-pairing parity
+under the modeled Stop-mode firmware; BLS12-381 is not. A
+hand-tuned Montgomery multiplier for BLS12-381 on Cortex-M4
+(beyond what GCC -O3 emits) would close the largest remaining
+gap and is the highest-leverage compute optimization.
+
+\paragraph{Where this work sits in the design space.}
+The trade-off framing of pairing delegation is usually stated
+as ``trust vs.\ energy'': cheap on-device verification of an
+expensive remote computation. Our measurements add a third
+axis --- \emph{firmware effort}. Without aggressive sleep-mode
+firmware, AmorE's protocol-level energy savings cannot be
+realized on a real MCU; the design wins on paper but loses in
+practice. Conversely, with a Stop-mode firmware, even a small
+batch ($N\!=\!2$ for BN254) tips the balance. This suggests
+that pairing-delegation studies that omit the firmware-state
+question may significantly overstate or understate the realized
+savings depending on what the device does while waiting.
+
+\paragraph{What the synthetic-data caveat does not invalidate.}
+The figures in this work are drawn from a mix of mock-PPK2 traces
+(synthesized in software during development) and real PPK2
+captures (voltage-sensitivity sweep, and the partial 12-round
+honest run on 2026-05-22). The qualitative claims --- amortization
+shape, ServerWait dominance, BLS-side ceiling, BN254 Stop-mode
+crossover at $N^{\star}\!=\!2$ --- depend on \emph{relative}
+energies and on the system architecture, not on absolute scale.
+A full re-collection on real hardware with a calibrated PPK2
+(Section~\ref{sec:limitations}, C1) would refine the absolute
+numbers but is not expected to change the shape of the conclusions.
+
 \section{Limitations and future work}
 \label{sec:limitations}
 
