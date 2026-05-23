@@ -108,9 +108,6 @@ try:
 
     # E.3: DUT-off
     ppk2.toggle_DUT_power("OFF"); time.sleep(0.5)
-    # Drain stale buffer
-    ppk2.start_measuring(); time.sleep(0.3); ppk2.get_data(); ppk2.stop_measuring()
-    time.sleep(0.2)
     mean_off, n_off = measure_1s()
     if mean_off is None:
         step("E.3", False, "no samples DUT-off")

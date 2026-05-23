@@ -12,3 +12,8 @@
 2026-05-23 17:21:38 | outer=933b19d | fw=6a75cea | smoke=PASS(2s) regr=PASS(97s)
 2026-05-23 17:26:27 | outer=082b0a6 | fw=6a75cea | smoke=PASS(2s) regr=PASS(95s)
 2026-05-23 17:45:50 | outer=d6a3eb4 | fw=6a75cea | smoke=PASS(5s) regr=PASS(96s)
+# 2026-05-23 17:50: smoke_ppk2 gate v3 introduced. Earlier entries
+# (2026-05-23 09:55 .. 17:45) used the pre-v3 single-point bounds
+# check that passed silently on a floating VOUT — those PASS marks
+# attest only to the pipeline working, NOT to STM32 being physically
+# connected. Treat pre-v3 entries as "pipeline-PASS, hardware-untested".
