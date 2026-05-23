@@ -266,3 +266,22 @@ After investigating error codes and submodule sync, we now have:
 - #8: No PPK2 trace capture during sweep (process gap)
 
 **Triage complete. Ready for code review.**
+
+### R1 (UPDATE 2026-05-23): server.py timeout=120s is the abort mechanism
+
+The server's `recv_packet(port, timeout_s=120.0)` at server.py line ~256
+is what produces the "No more packets for 120s — assuming benchmark
+complete" message. So when STM32 went silent at Round 13 of the n61
+sweep, this 120s timer is what called it.
+
+This means the abort is correctly diagnosed by the server side; the
+question for R1 investigation is **why STM32 stopped sending** —
+not what the server did about it. The server's behavior is reasonable
+(abort + report partial results) given the silent client.
+
+Suspect causes for STM32 silence (unchanged from original R1):
+- DWT_CYCCNT overflow (32-bit @ 168 MHz wraps every 25.6 s)
+- Thermal: vcore regulator under sustained load
+- UART buffer overrun on STM32 side
+- Memory issue on RPi server (py_ecc allocation growth?)
+
