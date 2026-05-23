@@ -112,26 +112,42 @@ def main(argv: list[str] | None = None) -> int:
     _ = ppk2.get_data()  # drain
 
     # Capture full window. Tag each sample with timestamp offset.
+    # Use monotonic clock so NTP jumps cannot corrupt relative timing.
     print(f"Sampling for {args.duration}s...")
-    t0 = time.time()
     samples_all = []   # list of (t_offset_s, current_uA)
-    while time.time() - t0 < args.duration:
-        t_now = time.time()
-        raw = ppk2.get_data()
-        if raw:
-            res = ppk2.get_samples(raw)
-            s = res[0] if isinstance(res, tuple) else res
-            # We don't know per-sample timing from the library, only the
-            # batch arrival time. Approximate by spreading samples over
-            # the inter-arrival interval.
-            t_off = t_now - t0
-            for v in s:
-                samples_all.append((t_off, v))
-        time.sleep(0.01)
-
-    # Cleanup PPK2
-    ppk2.toggle_DUT_power("OFF")
-    ppk2.stop_measuring()
+    try:
+        t0 = time.monotonic()
+        t_prev = t0
+        while time.monotonic() - t0 < args.duration:
+            t_now = time.monotonic()
+            raw = ppk2.get_data()
+            if raw:
+                res = ppk2.get_samples(raw)
+                s = res[0] if isinstance(res, tuple) else res
+                # Spread samples linearly across the inter-arrival interval
+                # [t_prev, t_now]. This is more accurate than attaching all
+                # samples in the batch to the same t_now — for a 250-sample
+                # batch arriving every ~10 ms, the spread is ~40 us per sample,
+                # which matters at the boot/stop boundary.
+                t_off_start = t_prev - t0
+                t_off_end = t_now - t0
+                n = len(s)
+                if n > 0:
+                    dt = (t_off_end - t_off_start) / n if n > 1 else 0.0
+                    for i, v in enumerate(s):
+                        samples_all.append((t_off_start + i * dt, v))
+                t_prev = t_now
+            time.sleep(0.01)
+    finally:
+        # Ensure clean PPK2 state even if the capture loop raised.
+        try:
+            ppk2.stop_measuring()
+        except Exception:
+            pass
+        try:
+            ppk2.toggle_DUT_power("OFF")
+        except Exception:
+            pass
 
     if not samples_all:
         print("FATAL: no samples collected", file=sys.stderr)
@@ -152,6 +168,16 @@ def main(argv: list[str] | None = None) -> int:
     boot_max_uA = max(boot) if boot else 0.0
     stop_mean_uA = statistics.mean(stop)
     stop_stdev_uA = statistics.stdev(stop) if n_stop > 1 else 0.0
+
+    # Refuse to PASS based on too-few stop samples (stdev=0 with 1 sample
+    # looks deceptively perfect). Require at least 100 samples post-boot.
+    MIN_STOP_SAMPLES = 100
+    if n_stop < MIN_STOP_SAMPLES:
+        print(f"⚠ WARNING: only {n_stop} samples in stop window "
+              f"(< {MIN_STOP_SAMPLES} required for reliable stats)",
+              file=sys.stderr)
+        print(f"   stdev may be misleadingly low; verdict cannot be trusted.",
+              file=sys.stderr)
     stop_min_uA = min(stop)
     stop_max_uA = max(stop)
     deviation_uA = stop_mean_uA - args.target_uA
@@ -170,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = args.out_dir / f"stop_{ts}.csv"
-    with csv_path.open("w", newline="") as f:
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["sample_index", "t_offset_s", "current_uA", "window"])
         for i, (t, v) in enumerate(samples_all):
@@ -180,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     # Write summary
     summary_path = args.out_dir / f"stop_{ts}.txt"
     verdict_pass = abs(deviation_uA) <= args.tolerance_uA
-    with summary_path.open("w") as f:
+    with summary_path.open("w", encoding="utf-8") as f:
         f.write(f"STM32 Stop-mode Validation Report\n")
         f.write(f"=" * 60 + "\n")
         f.write(f"Timestamp:       {datetime.now().isoformat()}\n")
