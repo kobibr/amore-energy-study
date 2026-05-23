@@ -17,3 +17,4 @@
 # check that passed silently on a floating VOUT — those PASS marks
 # attest only to the pipeline working, NOT to STM32 being physically
 # connected. Treat pre-v3 entries as "pipeline-PASS, hardware-untested".
+2026-05-23 18:09:52 | outer=6882f4c | fw=6a75cea | smoke=PASS(5s) regr=PASS(95s)

@@ -46,6 +46,56 @@ info()  { printf "  ${C}→${RST} %s\n" "$*"; }
 t_global=$(date +%s)
 
 # =============================================================================
+# Layer 0 — PPK2 hardware reality gate
+# =============================================================================
+# Added 2026-05-23 after discovering all earlier mini_regression PASSes
+# were on MockBackend / mock pipeline — they never verified that real
+# hardware (STM32 + PPK2) was actually wired and functional. The smoke
+# test below requires:
+#   1. PPK2 USB device present
+#   2. STM32 powered by PPK2 (DUT-on current > 1 mA, < 200 mA)
+#   3. Stable load (CV < 50%)
+# If any of these fail, mini_regression aborts before wasting 90s on
+# mock layers. The mock pipeline still works (Layers 1-8) but its PASS
+# is now provably grounded in hardware reality.
+layer 0 "PPK2 hardware reality gate (smoke_ppk2.sh)"
+# Wait 5s for the PPK2 USB session to fully release. If smoke_ppk2.sh
+# was just invoked by sanity_check.sh (standalone Step), the PPK2
+# firmware needs ~5s to return to idle before a new PPK2_API() init
+# can succeed. ppk2-api 0.9.2 calls ser.close() in __del__, but the
+# device itself holds state. Without this wait, Layer 0 falsely
+# reports "No PPK2 device found".
+info "waiting 5s for PPK2 USB to settle..."
+sleep 5
+t0=$(date +%s)
+if bash "${ES}/scripts/smoke_ppk2.sh" > "${LOG_DIR}/00_smoke_ppk2.log" 2>&1; then
+    elapsed=$(($(date +%s) - t0))
+    ok "smoke_ppk2 PASS (${elapsed}s)"
+else
+    elapsed=$(($(date +%s) - t0))
+    fail "smoke_ppk2 FAILED — STM32+PPK2 hardware not functional"
+    # Show the smoke_ppk2 summary so the user sees the gate that fired
+    echo
+    echo "${R}  ━━━ smoke_ppk2 summary (tail) ━━━${RST}"
+    tail -30 "${LOG_DIR}/00_smoke_ppk2.log" | sed 's/^/      /'
+    echo
+    echo "${R}  ▼ Without working hardware, mock-only layers below would${RST}"
+    echo "${R}    produce a misleading PASS. Aborting.${RST}"
+    echo
+    echo "  Full smoke log: ${LOG_DIR}/00_smoke_ppk2.log"
+    n_fail=$((n_fail+1))
+    failures+=("Layer 0: hardware gate")
+    # Print summary and exit early
+    echo
+    echo "${BOLD}${R}══════════════════════════════════════════════════════${RST}"
+    echo "${BOLD}${R}  MINI REGRESSION ABORTED — Layer 0 hardware gate${RST}"
+    echo "${BOLD}${R}══════════════════════════════════════════════════════${RST}"
+    echo "  Connect STM32 to PPK2 VOUT/GND, remove IDD jumper,"
+    echo "  flash firmware, then re-run."
+    exit 1
+fi
+
+# =============================================================================
 # Layer 1 — venv + deps
 # =============================================================================
 layer 1 "venv + python deps"

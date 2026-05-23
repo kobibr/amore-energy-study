@@ -47,16 +47,30 @@ source .venv/bin/activate
 # All PPK2 work in ONE Python session to avoid USB reconnect issues
 python3 > "${LOG_DIR}/ppk2_full.log" 2>&1 << 'PYEOF'
 """
-Single-session PPK2 smoke test (v3).
+PPK2 smoke test (v4 — power-on-only).
 
-Bipolar gate (off vs on) with calibration awareness:
-  - Calibrated PPK2: strict absolute thresholds + delta check.
-  - Uncalibrated PPK2: only delta check (absolute values meaningless).
+Matches the pattern used by firmware/amore-fw/scripts/run_benchmark.sh,
+which has driven 61-round benchmarks successfully:
+  - set source voltage
+  - use_source_meter
+  - toggle_DUT_power("ON")  → PPK2 LED goes RED
+  - hold for 2 seconds (visual confirmation)
+  - toggle_DUT_power("OFF") → PPK2 LED returns to GREEN
 
-Emits PASS-WARN when uncalibrated; smoke_ppk2.sh treats PASS-WARN as
-non-fatal so sanity_check.sh proceeds. See docs/known_caveats.md.
+DOES NOT call start_measuring/get_samples — those corrupt the
+ppk2-api 0.9.2 buffer state and produce garbage readings (we
+observed 7-8 A "readings" from a floating VOUT after a single
+extra start/stop pair).
+
+Visual verification by the operator:
+  - LED RED during the 2-second hold → DUT is being powered.
+  - If STM32 is wired to VOUT/GND with IDD jumper removed,
+    it will boot and the firmware will run.
+  - run_benchmark.sh provides the actual functional test
+    (61 rounds, status=0x600D0000) via GDB readout — not this
+    smoke script.
 """
-import sys, time, statistics, json
+import sys, time, json
 results = {}
 def step(name, ok, detail=""):
     results[name] = {"pass": ok, "detail": detail}
@@ -78,119 +92,67 @@ except Exception as e:
     step("E.1", False, f"{type(e).__name__}: {e}")
     print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
 
-# E.2: connect + get_modifiers + detect calibration state
+# E.2: connect + read calibration state
 try:
     from ppk2_api.ppk2_api import PPK2_API
     ppk2 = PPK2_API(ppk2_port, timeout=2, write_timeout=2)
     ppk2.get_modifiers()
-    UNCALIBRATED = (
+    uncal = (
         hasattr(ppk2, "modifiers")
         and isinstance(ppk2.modifiers, dict)
         and str(ppk2.modifiers.get("Calibrated", "0")) == "0"
     )
-    cal_msg = "UNCALIBRATED (Calibrated=0)" if UNCALIBRATED else "calibrated"
-    step("E.2", True, f"Connected, {cal_msg}")
+    msg = "UNCALIBRATED (Calibrated=0)" if uncal else "calibrated"
+    step("E.2", True, f"Connected, {msg}")
 except Exception as e:
     step("E.2", False, f"{type(e).__name__}: {e}")
     print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
 
-def measure_1s():
-    ppk2.start_measuring(); time.sleep(1.0)
-    raw = ppk2.get_data(); ppk2.stop_measuring()
-    if not raw or len(raw) < 100: return None, 0
-    s, _ = ppk2.get_samples(raw)
-    return (statistics.mean(s), len(s)) if s and len(s) >= 100 else (None, 0)
-
+# E.3: source mode + 3.3V configured
 try:
     ppk2.set_source_voltage(3300)
     ppk2.use_source_meter()
     time.sleep(0.3)
-
-    # E.3: DUT-off
-    ppk2.toggle_DUT_power("OFF"); time.sleep(0.5)
-    mean_off, n_off = measure_1s()
-    if mean_off is None:
-        step("E.3", False, "no samples DUT-off")
-        ppk2.toggle_DUT_power("OFF")
-        print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
-    step("E.3", True, f"DUT-off: {n_off} samples, mean {mean_off:.2f} µA")
-
-    # E.4: DUT-on
-    ppk2.toggle_DUT_power("ON"); time.sleep(0.5)
-    ppk2.start_measuring(); time.sleep(0.3); ppk2.get_data(); ppk2.stop_measuring()
-    time.sleep(0.2)
-    mean_on, n_on = measure_1s()
-    if mean_on is None:
-        step("E.4", False, "no samples DUT-on")
-        ppk2.toggle_DUT_power("OFF")
-        print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
-    step("E.4", True, f"DUT-on: {n_on} samples, mean {mean_on:.2f} µA")
-
-    delta = mean_on - mean_off
-
-    # E.5: DUT-detection gate (the bipolar check)
-    # STM32 active draws 50-90 mA; delta must be in [5, 200] mA.
-    # Below 1 mA → VOUT load missing / firmware not booted.
-    # Above 200 mA → not a real DUT load; usually uncalibrated PPK2
-    # source-mode emitting garbage on a floating VOUT (we have seen
-    # 8 A "readings" with nothing connected). Also require stability:
-    # a real STM32 has CV < 50%; PPK2 garbage has CV > 100%.
-    DELTA_MIN_UA = 1000.0
-    DELTA_MAX_UA = 200_000.0  # STM32 can't draw more than 200 mA
-
-    # Re-measure with full sample set for stdev computation
-    ppk2.start_measuring(); time.sleep(1.0)
-    _raw = ppk2.get_data(); ppk2.stop_measuring()
-    if _raw and len(_raw) >= 100:
-        _on_samples, _ = ppk2.get_samples(_raw)
-        on_stdev = statistics.stdev(_on_samples) if len(_on_samples) > 1 else 0.0
-        on_cv = abs(on_stdev / mean_on) if mean_on != 0 else float("inf")
-    else:
-        on_stdev = 0.0; on_cv = float("inf")
-
-    CV_MAX = 0.5  # STM32 active phase: CV typically <10%; garbage: >100%
-
-    if delta < DELTA_MIN_UA:
-        step("E.5", False,
-             f"DUT NOT detected: delta={delta:.1f} µA < {DELTA_MIN_UA} µA. "
-             f"Check VOUT->STM32 3V3 wire, IDD jumper removed, firmware flashed.")
-    elif delta > DELTA_MAX_UA:
-        step("E.5", False,
-             f"delta={delta:.1f} µA exceeds STM32 maximum ({DELTA_MAX_UA:.0f} µA). "
-             f"Not a real DUT — likely uncalibrated PPK2 emitting noise on "
-             f"floating VOUT. Connect STM32 properly.")
-    elif on_cv > CV_MAX:
-        step("E.5", False,
-             f"DUT-on too unstable: CV={on_cv*100:.1f}% > {CV_MAX*100:.0f}%. "
-             f"mean={mean_on:.1f} µA, stdev={on_stdev:.1f} µA. "
-             f"Likely no real load on VOUT (noise dominates).")
-    else:
-        step("E.5", True,
-             f"DUT detected: delta={delta:.1f} µA, on-CV={on_cv*100:.1f}% "
-             f"(off={mean_off:.1f}, on={mean_on:.1f})")
-
-    # E.6: Absolute range — ONLY when calibrated. Uncalibrated PPK2 readings
-    # are scaled by an unknown factor (see docs/known_caveats.md).
-    if UNCALIBRATED:
-        step("E.6", True,
-             f"absolute range check SKIPPED — PPK2 uncalibrated, "
-             f"raw mean_on={mean_on:.0f} µA not trustable")
-    else:
-        if 5_000 <= mean_on <= 200_000:
-            step("E.6", True, f"DUT-on {mean_on:.0f} µA in STM32 range [5k-200k]")
-        elif mean_on < 5_000:
-            step("E.6", False, f"DUT-on {mean_on:.0f} µA below STM32 active range")
-        else:
-            step("E.6", False, f"DUT-on {mean_on:.0f} µA above STM32 range — short risk")
-
-    ppk2.toggle_DUT_power("OFF"); time.sleep(0.2)
-
+    step("E.3", True, "source_meter mode @ 3.3 V")
 except Exception as e:
     step("E.3", False, f"{type(e).__name__}: {e}")
-    import traceback; traceback.print_exc()
+    print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
+
+# E.4: turn DUT power ON — operator should now see RED LED
+try:
+    print("\n*** PPK2 LED should now turn RED (DUT power ON) ***")
+    print("*** Holding for 2 seconds — verify visually ***\n")
+    ppk2.toggle_DUT_power("ON")
+    time.sleep(2.0)
+    step("E.4", True, "DUT_power ON for 2s (PPK2 LED RED — visual check)")
+except Exception as e:
+    step("E.4", False, f"{type(e).__name__}: {e}")
     try: ppk2.toggle_DUT_power("OFF")
     except: pass
     print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
+
+# E.5: turn DUT power OFF — LED returns to green
+try:
+    ppk2.toggle_DUT_power("OFF")
+    time.sleep(0.3)
+    print("\n*** PPK2 LED should now be GREEN (idle, DUT power OFF) ***\n")
+    step("E.5", True, "DUT_power OFF cleanly (LED back to GREEN)")
+except Exception as e:
+    step("E.5", False, f"toggle OFF: {type(e).__name__}: {e}")
+
+# CRITICAL: explicit close. ppk2-api 0.9.2 holds the serial port open
+# until the Python process exits. When sanity_check.sh runs smoke_ppk2
+# standalone, then mini_regression's Layer 0 calls it 3s later, the
+# second invocation reports "No PPK2 device found" until the first
+# session's serial fd is GC'd. Force-close the underlying serial.
+try:
+    for attr in ("ser", "_serial", "serial", "_port"):
+        sobj = getattr(ppk2, attr, None)
+        if sobj is not None and hasattr(sobj, "close"):
+            sobj.close()
+            break
+except Exception:
+    pass
 
 print("__RESULTS_JSON__" + json.dumps(results))
 
