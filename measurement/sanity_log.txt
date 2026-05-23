@@ -18,3 +18,4 @@
 # attest only to the pipeline working, NOT to STM32 being physically
 # connected. Treat pre-v3 entries as "pipeline-PASS, hardware-untested".
 2026-05-23 18:09:52 | outer=6882f4c | fw=6a75cea | smoke=PASS(5s) regr=PASS(95s)
+2026-05-23 18:56:18 | outer=4c55a93 | fw=6a75cea | smoke=PASS(3s) regr=PASS(103s)
