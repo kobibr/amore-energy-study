@@ -100,16 +100,31 @@ def measure_one_voltage(voltage_mV: int, duration_s: float,
         time.sleep(0.3)
         _ = ppk2.get_data()  # drain initial buffer
 
-        t0 = time.time()
+        # Bug #4 fix: use monotonic clock, matching stop_validation.py.
+        # NTP step during sampling could otherwise shift t_off and move
+        # samples in/out of the boot_skip window.
+        # Bug #5 fix: spread samples linearly over each batch's inter-
+        # arrival interval, instead of stamping the whole batch with
+        # t_now. The docstring claims this "exactly mirrors" PPK2Backend
+        # — but only with this fix does it actually mirror stop_validation's
+        # corrected behavior.
+        t0 = time.monotonic()
+        t_prev = t0
         samples_all: list[tuple[float, float]] = []
-        while time.time() - t0 < duration_s:
+        while time.monotonic() - t0 < duration_s:
+            t_now = time.monotonic()
             raw = ppk2.get_data()
             if raw:
                 res = ppk2.get_samples(raw)
                 s = res[0] if isinstance(res, tuple) else res
-                t_off = time.time() - t0
-                for v in s:
-                    samples_all.append((t_off, v))
+                t_off_start = t_prev - t0
+                t_off_end = t_now - t0
+                n = len(s)
+                if n > 0:
+                    dt = (t_off_end - t_off_start) / n if n > 1 else 0.0
+                    for i, v in enumerate(s):
+                        samples_all.append((t_off_start + i * dt, v))
+                t_prev = t_now
             time.sleep(DRAIN_INTERVAL_S)
 
         ppk2.stop_measuring()

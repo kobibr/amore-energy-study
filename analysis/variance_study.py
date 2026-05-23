@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 from datetime import datetime
@@ -46,6 +47,39 @@ sys.path.insert(0, str(ROOT / "measurement"))
 from analysis.compute_energy import compute_trace, TraceEnergy
 from analysis.parse_traces import parse_trace
 from analysis.variance_summary import summarize_replicas, CellSummary
+
+
+# Bug #3 fix: actual watchdog implementation. Used to wrap
+# backend.measure_replica() so a hung USB / stuck pyserial read can't
+# pin the whole sweep. SIGALRM is Linux-only and works only in the
+# main thread — both true of the Pi context this script targets.
+class WatchdogTimeout(Exception):
+    """Raised when backend.measure_replica exceeds its allotted time."""
+
+
+def _sigalrm_handler(_signum, _frame):
+    raise WatchdogTimeout("measure_replica exceeded watchdog deadline")
+
+
+def measure_replica_with_watchdog(backend, *, timeout_s: float, **kwargs):
+    """Run backend.measure_replica with a SIGALRM-based timeout.
+
+    Returns whatever the backend returns. If the watchdog fires, the
+    exception is allowed to propagate so the caller can build a FAIL
+    MeasurementResult and continue with the next replica.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        # Non-Linux fallback: no watchdog available. Better to run
+        # without protection than refuse to run at all.
+        return backend.measure_replica(**kwargs)
+
+    old_handler = signal.signal(signal.SIGALRM, _sigalrm_handler)
+    signal.alarm(max(1, int(timeout_s)))
+    try:
+        return backend.measure_replica(**kwargs)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def get_backend(name: str, ppk2_port: str | None = None) -> Any:
@@ -89,16 +123,67 @@ def run_replicas(backend, out_dir: Path, n_replicas: int, duration_s: float,
     n_fail = 0
     t_total = time.time()
 
+    # Bug #3 fix: each replica has a deadline of duration_s * 3 + 30s.
+    # Generous enough for normal slow PPK2 settle + USB enumeration,
+    # tight enough to catch a true hang within a couple of minutes.
+    watchdog_per_replica_s = duration_s * 3.0 + 30.0
+
     for i in range(1, n_replicas + 1):
         csv_path = out_dir / f"run_{i:03d}.csv"
-        print(f"  [{i}/{n_replicas}] {csv_path.name}  duration={duration_s}s")
+        print(f"  [{i}/{n_replicas}] {csv_path.name}  duration={duration_s}s  "
+              f"(watchdog={watchdog_per_replica_s:.0f}s)")
         t0 = time.time()
-        result = backend.measure_replica(
-            csv_out=csv_path,
-            duration_s=duration_s,
-            gpio_source=gpio_source,
-            log_dir=log_dir,
-        )
+        try:
+            result = measure_replica_with_watchdog(
+                backend,
+                timeout_s=watchdog_per_replica_s,
+                csv_out=csv_path,
+                duration_s=duration_s,
+                gpio_source=gpio_source,
+                log_dir=log_dir,
+            )
+        except WatchdogTimeout:
+            # Synthesize a FAIL MeasurementResult so the manifest /
+            # downstream loop logic stays uniform.
+            from backends import MeasurementResult
+            result = MeasurementResult(
+                ok=False,
+                csv_path=csv_path,
+                sample_count=0,
+                duration_actual_s=time.time() - t0,
+                error_message=(
+                    f"watchdog timeout after {watchdog_per_replica_s:.0f}s "
+                    f"(backend.measure_replica did not return)"
+                ),
+            )
+        except Exception as e:
+            # Bug #2 fix: previously only WatchdogTimeout was caught.
+            # Any other backend exception (SerialException, USBError,
+            # OSError, KeyError from a malformed result, internal
+            # backend bug) propagated out of run_replicas and killed
+            # the whole sweep: no manifest.json was written, every
+            # already-collected CSV was orphaned from the perspective
+            # of downstream tooling, and the watchdog's whole purpose
+            # — "continue past one bad replica" — was nullified by any
+            # non-timeout fault. Broaden to Exception (NOT BaseException
+            # so KeyboardInterrupt still works).
+            import traceback
+            tb_path = log_dir / f"run_{i:03d}.traceback.log"
+            try:
+                tb_path.write_text(traceback.format_exc())
+            except Exception:
+                pass
+            from backends import MeasurementResult
+            result = MeasurementResult(
+                ok=False,
+                csv_path=csv_path,
+                sample_count=0,
+                duration_actual_s=time.time() - t0,
+                error_message=(
+                    f"backend exception {type(e).__name__}: {e} "
+                    f"(traceback in {tb_path.name})"
+                ),
+            )
         wall_s = time.time() - t0
 
         rec = {
@@ -120,13 +205,18 @@ def run_replicas(backend, out_dir: Path, n_replicas: int, duration_s: float,
             n_fail += 1
             print(f"       [FAIL] {result.error_message}")
 
-        # Inter-replica PPK2 USB-reconnect grace period.
-        # Each replica opens+closes the PPK2 USB connection; ttyACM disappears
-        # briefly during teardown. Without this sleep, the next replica races
-        # the device re-enumeration.
+        # Inter-replica grace period.
+        # Bug #6 fix: only sleep when running on real PPK2 hardware,
+        # which actually re-enumerates over USB between replicas
+        # (~1-2s). MockBackend has no USB and no enumeration, so a
+        # 3-second sleep × n_replicas was pure dead time in CI and
+        # mock tests. ~90s wasted on a 30-replica mock sweep.
         if i < n_replicas:
-            print(f"       [wait 3s for PPK2 to re-enumerate]")
-            time.sleep(3.0)
+            backend_name = type(backend).__name__
+            if backend_name == "PPK2Backend":
+                print(f"       [wait 3s for PPK2 to re-enumerate]")
+                time.sleep(3.0)
+            # else: MockBackend or other — no inter-replica wait needed.
 
     manifest["wall_s_total"] = round(time.time() - t_total, 2)
     manifest["n_ok"] = n_ok

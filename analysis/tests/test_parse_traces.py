@@ -42,7 +42,13 @@ def test_single_phase():
     assert p.mean_voltage_V == pytest.approx(3.3)
 
 
-def test_transition_creates_two_phases():
+def test_two_transitions_create_three_phases():
+    """5 samples with pattern 0,0,1,1,0 → 3 segments.
+
+    Bug #6 fix: previously named `test_transition_creates_two_phases`
+    which misleads — the input has TWO transitions, producing THREE
+    phases. Renamed to match what the assertion actually verifies.
+    """
     rows = [
         (0,   50000.0, 3.3, 0),    # idle
         (40,  50000.0, 3.3, 0),

@@ -219,73 +219,116 @@ class ServerSession:
         self._streamer_thread.start()
 
     def stop_streaming(self) -> None:
-        """Signal the streamer to stop, join it, close CSV."""
-        if not self._streaming:
+        """Signal the streamer to stop, join it, close CSV.
+
+        Safe to call multiple times. The streamer's _streamer_loop also
+        runs the same cleanup in its finally block (see Bug #1/#2
+        fixes), so this method is idempotent — closing an already-closed
+        fp is a no-op via the None check.
+        """
+        if not self._streaming and self._streamer_thread is None:
             return
         self._stop_event.set()
         if self._streamer_thread is not None:
             self._streamer_thread.join(timeout=2.0)
             self._streamer_thread = None
-        if self._csv_fp is not None:
-            try:
-                self._csv_fp.close()
-            except Exception:
-                pass
-            self._csv_fp = None
+        with self._csv_lock:
+            if self._csv_fp is not None:
+                try:
+                    self._csv_fp.close()
+                except Exception:
+                    pass
+                self._csv_fp = None
         self._streaming = False
 
     def _streamer_loop(self) -> None:
-        """Stream sample chunks to the wire + CSV, paced near real time."""
+        """Stream sample chunks to the wire + CSV, paced near real time.
+
+        Guarantees on every exit path (natural end / external stop /
+        exception): self._streaming is reset to False, the CSV file
+        handle is closed, and self._stop_event is set so any subsequent
+        stop_streaming() call returns immediately. Failures inside the
+        loop also send an encode_error to the client.
+        """
         try:
-            source = resolve_gpio_source(self.gpio_spec)
-        except Exception as e:
-            log.error("could not resolve GPIO source: %s", e)
-            return
+            try:
+                source = resolve_gpio_source(self.gpio_spec)
+            except Exception as e:
+                log.error("could not resolve GPIO source: %s", e)
+                try:
+                    self.send_line(encode_error(f"gpio source failed: {e}"))
+                except Exception:
+                    pass
+                return
 
-        end_time_us = int(self.duration_s * 1_000_000)
-        rng = (
-            random.Random(self.rng_seed)
-            if self.rng_seed is not None else None
-        )
-        gpio_samples = interpolate_to_fixed_rate(
-            source.events(),
-            end_time_us=end_time_us,
-            sample_period_us=self.sample_period_us,
-        )
-        sample_iter: Iterator[Sample] = assemble_samples(
-            gpio_samples,
-            voltage_mV=self.voltage_mV,
-            stop_mode=self.stop_mode,
-            rng=rng,
-        )
-
-        chunk_buf: list[Tuple[int, float, float, int]] = []
-        next_chunk_boundary = CHUNK_DURATION_US
-        wall_t0 = time.monotonic()
-
-        for s in sample_iter:
-            if self._stop_event.is_set():
-                break
-            chunk_buf.append(
-                (s.timestamp_us, s.current_uA, s.voltage_V, s.gpio_byte)
+            end_time_us = int(self.duration_s * 1_000_000)
+            rng = (
+                random.Random(self.rng_seed)
+                if self.rng_seed is not None else None
+            )
+            gpio_samples = interpolate_to_fixed_rate(
+                source.events(),
+                end_time_us=end_time_us,
+                sample_period_us=self.sample_period_us,
+            )
+            sample_iter: Iterator[Sample] = assemble_samples(
+                gpio_samples,
+                voltage_mV=self.voltage_mV,
+                stop_mode=self.stop_mode,
+                rng=rng,
             )
 
-            if s.timestamp_us + self.sample_period_us >= next_chunk_boundary:
+            chunk_buf: list[Tuple[int, float, float, int]] = []
+            next_chunk_boundary = CHUNK_DURATION_US
+            wall_t0 = time.monotonic()
+
+            for s in sample_iter:
+                if self._stop_event.is_set():
+                    break
+                chunk_buf.append(
+                    (s.timestamp_us, s.current_uA, s.voltage_V, s.gpio_byte)
+                )
+
+                if s.timestamp_us + self.sample_period_us >= next_chunk_boundary:
+                    self._flush_chunk(chunk_buf)
+                    chunk_buf = []
+
+                    if self.pacing == "real-time":
+                        # Sleep until wall clock catches up to logical time.
+                        target_wall = wall_t0 + (next_chunk_boundary / 1_000_000.0)
+                        slack = target_wall - time.monotonic()
+                        if slack > 0:
+                            self._stop_event.wait(timeout=slack)
+                    # When pacing == "none" we just continue immediately.
+                    next_chunk_boundary += CHUNK_DURATION_US
+
+            # Final partial chunk
+            if chunk_buf and not self._stop_event.is_set():
                 self._flush_chunk(chunk_buf)
-                chunk_buf = []
-
-                if self.pacing == "real-time":
-                    # Sleep until wall clock catches up to logical time.
-                    target_wall = wall_t0 + (next_chunk_boundary / 1_000_000.0)
-                    slack = target_wall - time.monotonic()
-                    if slack > 0:
-                        self._stop_event.wait(timeout=slack)
-                # When pacing == "none" we just continue immediately.
-                next_chunk_boundary += CHUNK_DURATION_US
-
-        # Final partial chunk
-        if chunk_buf and not self._stop_event.is_set():
-            self._flush_chunk(chunk_buf)
+        except Exception as e:
+            # Bug #2 fix: any uncaught exception inside the loop would
+            # otherwise just kill the thread and leave self._streaming
+            # True forever. Tell the client what happened, then fall
+            # through to the finally cleanup.
+            log.exception("streamer crashed")
+            try:
+                self.send_line(encode_error(f"streamer crashed: {e}"))
+            except Exception:
+                pass
+        finally:
+            # Bug #1 fix: guarantee state reset on every exit path
+            # (natural end-of-scenario, external stop, or exception).
+            # Without this, a second start_measuring() would be a silent
+            # no-op because of the "if self._streaming: return" gate.
+            self._stop_event.set()
+            with self._csv_lock:
+                if self._csv_fp is not None:
+                    try:
+                        self._csv_fp.close()
+                    except Exception:
+                        pass
+                    self._csv_fp = None
+            self._streaming = False
 
     def _flush_chunk(
         self, samples: list[Tuple[int, float, float, int]]

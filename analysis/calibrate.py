@@ -8,7 +8,43 @@ Procedure:
      PPK2 VOUT and PPK2 GND.
   3. Run this script.
   4. PPK2 sources 3.3V, measures current. Expected: I = V/R.
-     For 33Ω @ 3.3V: I_expected = 100.0 mA. Tolerance: ±2%.
+     For 33Ω @ 3.3V: I_expected = 100.0 mA.
+
+Tolerance policy (silent-bias review 2026-05-23)
+------------------------------------------------
+The PPK2 datasheet specifies ±0.5 % accuracy in source-meter mode. The
+default tolerance here is **1.0 %**, which gives ~2× headroom over the
+spec while still catching a meaningfully drifted instrument. The
+previous default of 2.0 % was 4× the spec — a broken PPK2 reading
+1.5 % low would have PASSed calibration silently and then propagated
+that 1.5 % bias into every published energy figure.
+
+We expose THREE policy constants:
+  - TIGHT_TOLERANCE_PCT      = 1.0  — paper-grade threshold. The
+                                       verdict is PASS only if
+                                       |deviation| ≤ this value.
+  - BORDERLINE_TOLERANCE_PCT = 2.0  — documentary band, retained as
+                                       a named reference point (the
+                                       previous default tolerance,
+                                       and the rough threshold below
+                                       which a PPK2 is still in the
+                                       "marginal but usable" regime).
+                                       NOT used in the verdict logic;
+                                       PASS-WARN fires for any
+                                       deviation > TIGHT.
+  - HARD_FAIL_TOLERANCE_PCT  = 5.0  — instrument is broken; refuse
+                                       to honor a --tolerance-pct
+                                       above this.
+
+Bug #2 fix (silent-bias re-review 2026-05-23): the previous help text
+claimed PASS-WARN fired above BORDERLINE, but the code fired it above
+TIGHT. Help text and policy text now match the actual behavior:
+PASS-WARN fires whenever deviation exceeds the TIGHT band AND the user
+has loosened --tolerance-pct beyond TIGHT.
+
+Use --tolerance-pct only when you have a documented reason (e.g. a
+known-bad resistor batch); paper figures must come from data with
+deviation below TIGHT_TOLERANCE_PCT.
 
 Output:
   - Pass/fail verdict
@@ -20,7 +56,7 @@ Usage:
   python3 -m analysis.calibrate
   python3 -m analysis.calibrate --resistor-ohms 33.0
   python3 -m analysis.calibrate --resistor-ohms 100.0 --voltage-mv 3300
-  python3 -m analysis.calibrate --duration-s 10 --tolerance-pct 2.0
+  python3 -m analysis.calibrate --duration-s 10 --tolerance-pct 1.0
 
 Exit codes:
   0 = calibration PASS within tolerance
@@ -42,6 +78,16 @@ try:
 except ImportError as e:
     print(f"FATAL: cannot import ppk2_api: {e}", file=sys.stderr)
     sys.exit(2)
+
+
+# Silent-bias review (2026-05-23): tolerance policy constants.
+# Default tolerance was 2.0 % — 4× the PPK2's ±0.5 % datasheet spec.
+# A 1.5 % systematically-biased PPK2 would silently PASS, then carry
+# that bias into every downstream energy figure. The new default is
+# 1.0 %; broader bands are exposed only for diagnostic use.
+TIGHT_TOLERANCE_PCT      = 1.0   # paper-grade default
+BORDERLINE_TOLERANCE_PCT = 2.0   # flagged as PASS-WARN
+HARD_FAIL_TOLERANCE_PCT  = 5.0   # instrument is broken
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,8 +113,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--tolerance-pct",
         type=float,
-        default=2.0,
-        help="Pass/fail tolerance as percent (default: 2.0)",
+        default=TIGHT_TOLERANCE_PCT,
+        help=(
+            f"Pass/fail tolerance as percent (default: {TIGHT_TOLERANCE_PCT}, "
+            f"paper-grade). The PPK2 datasheet spec is ±0.5%%. "
+            f"Verdict bands: "
+            f"PASS if deviation ≤ {TIGHT_TOLERANCE_PCT}%% (paper-grade); "
+            f"PASS-WARN if {TIGHT_TOLERANCE_PCT}%% < deviation ≤ "
+            f"--tolerance-pct (only possible when --tolerance-pct is "
+            f"loosened beyond {TIGHT_TOLERANCE_PCT}%%); "
+            f"FAIL otherwise. Values above {HARD_FAIL_TOLERANCE_PCT}%% "
+            f"are rejected up-front — the instrument is treated as "
+            f"broken regardless of override."
+        ),
     )
     p.add_argument(
         "--log-dir",
@@ -77,6 +134,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for CSV logs",
     )
     args = p.parse_args(argv)
+
+    # Silent-bias review: refuse to honor an absurd tolerance, even if
+    # the user passes one explicitly. A 10% "calibration" isn't a
+    # calibration — it's a placebo.
+    if args.tolerance_pct > HARD_FAIL_TOLERANCE_PCT:
+        print(
+            f"FATAL: --tolerance-pct={args.tolerance_pct} exceeds "
+            f"HARD_FAIL_TOLERANCE_PCT={HARD_FAIL_TOLERANCE_PCT}. "
+            f"At this tolerance, a broken instrument would PASS. Refusing.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Enumerate PPK2
     devs = PPK2_API.list_devices()
@@ -105,25 +174,43 @@ def main(argv: list[str] | None = None) -> int:
     ppk2.use_source_meter()
     ppk2.toggle_DUT_power("ON")
     time.sleep(0.5)
-    ppk2.start_measuring()
-    time.sleep(0.3)
-    _ = ppk2.get_data()  # drain initial buffer
 
-    # Capture
-    print(f"Sampling for {args.duration_s}s...")
-    t0 = time.time()
+    # Bug #1 fix (silent-bias review): wrap the entire sampling block
+    # in try/finally so power to the resistor is always cut, even on
+    # KeyboardInterrupt, USB disconnect, ppk2_api exception, or any
+    # other failure. At 33Ω @ 3.3V the resistor dissipates ~330 mW;
+    # a 1/4 W part would burn if left powered after a crash. Worse,
+    # a user thinking the script "ended" may touch the rails while
+    # VOUT is still hot.
     samples = []
-    while time.time() - t0 < args.duration_s:
-        raw = ppk2.get_data()
-        if raw:
-            res = ppk2.get_samples(raw)
-            s = res[0] if isinstance(res, tuple) else res
-            samples.extend(s)
-        time.sleep(0.01)
+    try:
+        ppk2.start_measuring()
+        time.sleep(0.3)
+        _ = ppk2.get_data()  # drain initial buffer
 
-    # Cleanup
-    ppk2.toggle_DUT_power("OFF")
-    ppk2.stop_measuring()
+        # Capture
+        print(f"Sampling for {args.duration_s}s...")
+        t0 = time.time()
+        while time.time() - t0 < args.duration_s:
+            raw = ppk2.get_data()
+            if raw:
+                res = ppk2.get_samples(raw)
+                s = res[0] if isinstance(res, tuple) else res
+                samples.extend(s)
+            time.sleep(0.01)
+    finally:
+        # Order matters: stop_measuring first, then power off. Stop
+        # quiesces the firmware sampling state machine; power-off
+        # then de-energises the resistor. Each is best-effort —
+        # neither must mask the other.
+        try:
+            ppk2.stop_measuring()
+        except Exception:
+            pass
+        try:
+            ppk2.toggle_DUT_power("OFF")
+        except Exception:
+            pass
 
     if not samples:
         print("FATAL: no samples collected", file=sys.stderr)
@@ -173,9 +260,38 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Summary: {summary_path}")
     print()
 
-    # Verdict
-    if abs(deviation_pct) <= args.tolerance_pct:
+    # Verdict (silent-bias review: three bands instead of pass/fail).
+    abs_dev = abs(deviation_pct)
+    if abs_dev <= args.tolerance_pct:
+        verdict = "PASS"
+        if abs_dev > TIGHT_TOLERANCE_PCT and args.tolerance_pct > TIGHT_TOLERANCE_PCT:
+            # User loosened tolerance AND we're outside the tight band.
+            # Surface this loudly so it doesn't slip into paper figures.
+            verdict = "PASS-WARN"
+    else:
+        verdict = "FAIL"
+
+    # Rewrite the verdict line in the summary file
+    with summary_path.open("a") as f:
+        f.write(f"Verdict-band: {verdict}\n")
+        if verdict == "PASS-WARN":
+            f.write(
+                f"NOTE: deviation {deviation_pct:+.2f}% exceeded the "
+                f"tight {TIGHT_TOLERANCE_PCT}% policy band; only the "
+                f"user-relaxed {args.tolerance_pct}% gate allowed PASS. "
+                f"This data should NOT be used for paper figures.\n"
+            )
+
+    if verdict == "PASS":
         print(f"  ✓ PASS — deviation {deviation_pct:+.2f}% within ±{args.tolerance_pct}%")
+        return 0
+    elif verdict == "PASS-WARN":
+        print(
+            f"  ⚠ PASS-WARN — deviation {deviation_pct:+.2f}% exceeds the "
+            f"tight {TIGHT_TOLERANCE_PCT}% policy band but within the "
+            f"relaxed {args.tolerance_pct}% gate. Do NOT use for paper "
+            f"figures; re-cal the PPK2 or replace the resistor."
+        )
         return 0
     else:
         print(f"  ✗ FAIL — deviation {deviation_pct:+.2f}% exceeds ±{args.tolerance_pct}%")

@@ -137,14 +137,43 @@ class MockPPK2:
         self._call("connect")
 
     def disconnect(self) -> None:
-        """Send disconnect, stop reader, close socket. Idempotent."""
+        """Send disconnect, stop reader, close socket. Idempotent.
+
+        Bug #5 fix: previously called self._call("disconnect"), which
+        waits up to 5 s for a response. If the server has crashed or
+        the network has dropped, the user's cleanup code would hang
+        for the full timeout. We're tearing down anyway, so we send
+        the disconnect line best-effort and immediately proceed to
+        local socket teardown without waiting for an ack.
+        """
         if not self._connected:
             return
-        try:
-            self._call("disconnect")
-        except Exception:
-            pass  # best-effort; we're tearing down anyway
+        # Mark disconnected first so the reader thread, when it sees the
+        # socket close, doesn't try to dispatch lingering messages.
         self._connected = False
+        # Fire-and-forget disconnect notice; if the server is alive it
+        # will close cleanly, if not we don't care.
+        if self._sock_file is not None:
+            try:
+                self._sock_file.write(encode_command("disconnect"))
+                self._sock_file.flush()
+            except Exception:
+                pass
+        # Give the server a brief window to read the disconnect line
+        # before we close the socket out from under it. Bug fix layered
+        # over the original Bug #5: original kept _call's 5s timeout
+        # which hung on dead servers; this small read with 0.5s timeout
+        # bounded by setblocking+timeout, gives a live server enough to
+        # log the cmd but never hangs.
+        if self._sock is not None:
+            try:
+                self._sock.settimeout(0.5)
+                # Try to read until server closes or timeout. Server
+                # should close shortly after receiving "disconnect".
+                while self._sock.recv(4096):
+                    pass
+            except (OSError, socket.timeout):
+                pass
         self._reader_stop.set()
         if self._sock_file is not None:
             try:

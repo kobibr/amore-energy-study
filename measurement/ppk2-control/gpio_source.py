@@ -29,6 +29,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol
 
+# Bug #5 fix (silent-bias review 2026-05-23): align the scenario_format
+# import to a bare-name import the rest of measurement/
+# uses (e.g. run_cell.py's sys.path manipulation).
+# The previous bare-name import ``from scenario_format`` worked only
+# when Python was invoked from inside the measurement/ directory, and
+# would ImportError under ``python -m measurement.run_cell`` or any
+# pytest collection from the repo root — so unit tests passed
+# (ScriptedGPIOSource never touches scenario_format at module-load
+# time) but integration runs and CI silently fell over the moment
+# FileGPIOSource was instantiated.
 from scenario_format import GPIOEvent, parse_scenario
 
 

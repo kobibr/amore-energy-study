@@ -1,8 +1,20 @@
 """Tests for measurement/backends.py — the Backend Protocol and
 MockBackend implementation.
 
-PPK2Backend cannot be tested without hardware, so we only assert that
-its stub methods raise NotImplementedError with a clear message.
+Covers three concerns:
+  1. The Backend Protocol contract advertises measure_replica
+     (test_backend_protocol_has_measure_replica).
+  2. MockBackend constructs and runs an end-to-end 5-second smoke
+     capture against the mock server (test_mock_backend_*).
+  3. PPK2Backend constructs with the documented defaults and exposes
+     measure_replica as a callable attribute
+     (test_ppk2_backend_constructs_and_has_real_method).
+
+The PPK2Backend test does NOT invoke measure_replica — that requires
+real PPK2 hardware and is exercised by scripts/smoke_ppk2.sh. The
+callable-attribute check is intentionally weak: it only proves the
+method exists, not that the implementation works. Don't treat a green
+result on this file as evidence that hardware integration is OK.
 """
 import sys
 from pathlib import Path
@@ -17,8 +29,17 @@ from backends import Backend, MockBackend, PPK2Backend, MeasurementResult  # noq
 
 
 def test_backend_protocol_has_measure_replica():
-    """The Protocol contract advertises a measure_replica method."""
-    assert hasattr(Backend, "measure_replica") or hasattr(Backend, "__protocol_attrs__")
+    """The Protocol contract advertises a measure_replica method.
+
+    Bug #4 fix: previously this assertion used `... or hasattr(Backend,
+    '__protocol_attrs__')`, which is always true for typing.Protocol
+    classes on Python 3.12+ — meaning the test would pass even if
+    measure_replica were removed from the Backend protocol. Tightened
+    to a direct hasattr check.
+    """
+    assert hasattr(Backend, "measure_replica"), (
+        "Backend protocol must advertise measure_replica"
+    )
 
 
 def test_mock_backend_implements_protocol():
@@ -28,13 +49,20 @@ def test_mock_backend_implements_protocol():
 
 
 def test_ppk2_backend_constructs_and_has_real_method():
-    """PPK2Backend is now implemented. Verify it constructs with defaults,
-    and measure_replica is a real method (not raising NotImplementedError).
+    """PPK2Backend constructs with documented defaults, and
+    measure_replica exists as a callable attribute on the instance.
 
-    Does not run measure_replica here - that requires real hardware.
-    See scripts/smoke_ppk2.sh for hardware-in-the-loop validation."""
-    from measurement.backends import PPK2Backend
+    Bug #5 fix: docstring no longer claims this verifies measure_replica
+    "is a real method (not raising NotImplementedError)" — `callable()`
+    only inspects the attribute, not its behaviour. To actually verify
+    the method runs end-to-end, see scripts/smoke_ppk2.sh (real hardware).
 
+    Bug #1 fix: the local `from measurement.backends import PPK2Backend`
+    that was previously here was redundant (PPK2Backend is already imported
+    at module top via the sys.path injection) and fragile (the qualified
+    name requires ROOT on sys.path, which is not what the file sets up).
+    Removed.
+    """
     backend = PPK2Backend()
     assert backend.serial_port == "/dev/ttyACM1"
     assert backend.voltage_mV == 3300
@@ -45,7 +73,7 @@ def test_ppk2_backend_constructs_and_has_real_method():
     assert backend2.voltage_mV == 3000
     assert backend2.settle_s == 1.0
 
-    # measure_replica is callable (not raising NotImplementedError at attribute lookup)
+    # Attribute lookup only — this does NOT prove the method runs.
     assert callable(backend.measure_replica)
 
 def test_measurement_result_is_a_dataclass():

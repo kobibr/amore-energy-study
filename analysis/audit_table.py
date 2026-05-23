@@ -81,6 +81,10 @@ def parse_voltage_sensitivity(path: Path) -> list[AuditEntry]:
             v_mV = int(m.group(1))
             I_mA = float(m.group(2))
             I_std = float(m.group(3))
+            # Bug L3 fix: previously group(4) (CV%) was captured but
+            # never stored. The paper headline is about variance, so we
+            # surface CV explicitly in the notes column.
+            CV_pct = float(m.group(4))
             P_mW = float(m.group(5))
             v_label = f"{v_mV/1000:.1f}V"
             entries.append(AuditEntry(
@@ -90,6 +94,7 @@ def parse_voltage_sensitivity(path: Path) -> list[AuditEntry]:
                 unit="mA",
                 source=src,
                 status="measured",
+                notes=f"CV = {CV_pct:.1f}%",
             ))
             entries.append(AuditEntry(
                 category="electrical",
@@ -108,8 +113,16 @@ def parse_variance_report(path: Path) -> list[AuditEntry]:
         return []
     text = path.read_text()
     entries: list[AuditEntry] = []
-    src = str(path.relative_to(Path("measurement").parent)
-              if path.is_absolute() else path)
+    # Bug L2 fix: Path.relative_to() raises ValueError when the absolute
+    # path is not under the anchor. That would crash the whole audit
+    # collector for one stray file. Fall back to a safer label.
+    if path.is_absolute():
+        try:
+            src = str(path.relative_to(Path("measurement").parent))
+        except ValueError:
+            src = path.name
+    else:
+        src = str(path)
 
     # variance_report.txt format includes total energy + CV
     # Look for lines like:
@@ -195,15 +208,26 @@ def parse_stop_validation(path: Path) -> list[AuditEntry]:
     m = re.search(r"Stop window:.*?mean:\s*([\d.]+)\s*\u00b5A", text, re.DOTALL)
     if m:
         uA = float(m.group(1))
-        # If stop_test.elf was flashed we'd expect ~0.5 uA; large values mean
-        # the firmware wasn't actually in stop mode at the time of capture.
-        if uA < 100:
+        # Bug M4 fix: expected IDD_STOP is ~0.5 µA (datasheet typical).
+        # The previous 100 µA threshold accepts 80 µA (160× expected) as
+        # "measured" — that means firmware wasn't really in Stop mode.
+        # Tightened to a 3-tier:
+        #   < 5 µA   → measured (within 10× of typical)
+        #   < 50 µA  → measured but borderline (note the deviation)
+        #   ≥ 50 µA  → pending; almost certainly firmware not in Stop mode
+        if uA < 5:
             status = "measured"
-            notes = "stop-mode firmware flashed"
+            notes = f"stop-mode firmware flashed; within 10× of 0.5 µA typical"
+        elif uA < 50:
+            status = "measured"
+            notes = (
+                f"reported {uA:.1f} µA — borderline (>10× of 0.5 µA typical, "
+                "but plausibly Stop mode with peripheral leak)"
+            )
         else:
             status = "pending"
             notes = (
-                f"reported {uA:.1f} uA — too high for stop-mode; "
+                f"reported {uA:.1f} µA — too high for stop-mode (>100× typical); "
                 "needs stop_test.elf flashed"
             )
         entries.append(AuditEntry(
@@ -253,9 +277,12 @@ def compute_comm_projections() -> list[AuditEntry]:
     for radio, anchor in ANCHORS.items():
         amore = project_amore(anchor)
         direct_50 = project_direct(50, anchor)
-        # crossover
+        # Bug H2 fix: AmorE comm is PER ROUND (sends one Setup + receives
+        # one Result every round), so the "crossover" framing was wrong —
+        # both AmorE and Direct comm scale linearly with N. Re-label as
+        # an OVERHEAD RATIO: AmorE-round-comm / Direct-pairing-comm.
         per_pairing = project_direct(1, anchor)
-        crossover_N = (
+        overhead_ratio = (
             amore["E_total_mJ"] / per_pairing["E_total_mJ"]
             if per_pairing["E_total_mJ"] > 0 else 0.0
         )
@@ -266,7 +293,7 @@ def compute_comm_projections() -> list[AuditEntry]:
             unit="mJ",
             source="comm_projection.py (datasheet)",
             status="computed",
-            notes="constant across N",
+            notes="per AmorE round; linear in N",
         ))
         entries.append(AuditEntry(
             category="comm",
@@ -278,11 +305,17 @@ def compute_comm_projections() -> list[AuditEntry]:
         ))
         entries.append(AuditEntry(
             category="comm",
-            claim=f"Comm-only crossover N ({radio})",
-            value=f"{crossover_N:.2f}",
-            unit="pairings",
+            claim=f"AmorE comm overhead ratio ({radio})",
+            value=f"{overhead_ratio:.2f}",
+            unit="× Direct/pairing",
             source="comm_projection.py (datasheet)",
             status="computed",
+            notes=(
+                "ratio = AmorE-round-comm / Direct-per-pairing-comm. "
+                "Both scale linearly with N — there is NO comm-only "
+                "crossover; AmorE wins on TOTAL energy via compute "
+                "amortization."
+            ),
         ))
     return entries
 
@@ -334,25 +367,34 @@ def render_stdout(entries: list[AuditEntry]) -> None:
     for e in entries:
         by_cat.setdefault(e.category, []).append(e)
 
+    # Bug L1 fix: use .get() with a fallback so a future status value
+    # (e.g. "stale", "estimated") doesn't crash the renderer with KeyError.
+    status_marks = {"measured": "✓", "computed": "≈", "pending": "·"}
+
     for cat in sorted(by_cat):
         print(f"\n━━━ {cat.upper()} ━━━")
         for e in by_cat[cat]:
-            mark = {"measured": "✓", "computed": "≈", "pending": "·"}[e.status]
+            mark = status_marks.get(e.status, "?")
             val = f"{e.value} {e.unit}".strip()
             print(f"  {mark} {e.claim:<48s} {val:>20s}   ({e.source})")
             if e.notes:
                 print(f"      └ {e.notes}")
 
-    # Status counts
-    counts = {"measured": 0, "computed": 0, "pending": 0}
+    # Status counts — also use .get() and aggregate unknown statuses
+    # together rather than missing them.
+    counts: dict[str, int] = {}
     for e in entries:
         counts[e.status] = counts.get(e.status, 0) + 1
     total = sum(counts.values())
     print()
-    print(f"  Total entries: {total}  "
-          f"({counts['measured']} measured, "
-          f"{counts['computed']} computed, "
-          f"{counts['pending']} pending)")
+    summary_parts = []
+    for key in ("measured", "computed", "pending"):
+        summary_parts.append(f"{counts.get(key, 0)} {key}")
+    other = {k: v for k, v in counts.items()
+             if k not in ("measured", "computed", "pending")}
+    for k, v in sorted(other.items()):
+        summary_parts.append(f"{v} {k}")
+    print(f"  Total entries: {total}  ({', '.join(summary_parts)})")
 
 
 def render_markdown(entries: list[AuditEntry]) -> str:
@@ -367,6 +409,11 @@ def render_markdown(entries: list[AuditEntry]) -> str:
     for e in entries:
         by_cat.setdefault(e.category, []).append(e)
 
+    # Bug L1 fix: defensive .get() with fallback.
+    md_marks = {"measured": "✓ measured",
+                "computed": "≈ computed",
+                "pending":  "· pending"}
+
     for cat in sorted(by_cat):
         out.append(f"## {cat.capitalize()}")
         out.append("")
@@ -374,9 +421,7 @@ def render_markdown(entries: list[AuditEntry]) -> str:
         out.append("|-------|-------|--------|--------|-------|")
         for e in by_cat[cat]:
             val = f"{e.value} {e.unit}".strip()
-            mark = {"measured": "✓ measured",
-                    "computed": "≈ computed",
-                    "pending":  "· pending"}[e.status]
+            mark = md_marks.get(e.status, f"? {e.status}")
             notes = e.notes.replace("|", "\\|") if e.notes else ""
             out.append(f"| {e.claim} | {val} | {mark} | `{e.source}` | {notes} |")
         out.append("")

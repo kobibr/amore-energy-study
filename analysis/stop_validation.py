@@ -169,14 +169,18 @@ def main(argv: list[str] | None = None) -> int:
     stop_mean_uA = statistics.mean(stop)
     stop_stdev_uA = statistics.stdev(stop) if n_stop > 1 else 0.0
 
-    # Refuse to PASS based on too-few stop samples (stdev=0 with 1 sample
-    # looks deceptively perfect). Require at least 100 samples post-boot.
+    # Bug #2 fix: previously this only printed a warning and let the
+    # script keep running — so n_stop=1 (stdev=0, looks "perfect") could
+    # return exit 0 (PASS) and feed a false Stop-mode anchor downstream.
+    # Now we hard-gate the verdict on n_stop, and record the reason in
+    # the summary file rather than just stderr.
     MIN_STOP_SAMPLES = 100
-    if n_stop < MIN_STOP_SAMPLES:
+    too_few_samples = n_stop < MIN_STOP_SAMPLES
+    if too_few_samples:
         print(f"⚠ WARNING: only {n_stop} samples in stop window "
               f"(< {MIN_STOP_SAMPLES} required for reliable stats)",
               file=sys.stderr)
-        print(f"   stdev may be misleadingly low; verdict cannot be trusted.",
+        print(f"   verdict will be FAIL regardless of mean value.",
               file=sys.stderr)
     stop_min_uA = min(stop)
     stop_max_uA = max(stop)
@@ -205,7 +209,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Write summary
     summary_path = args.out_dir / f"stop_{ts}.txt"
-    verdict_pass = abs(deviation_uA) <= args.tolerance_uA
+    # Bug #2 fix: verdict must require enough samples to be trustworthy,
+    # not just a target-relative tolerance. n_stop < MIN_STOP_SAMPLES
+    # is an automatic FAIL irrespective of mean.
+    within_tolerance = abs(deviation_uA) <= args.tolerance_uA
+    verdict_pass = within_tolerance and not too_few_samples
     with summary_path.open("w", encoding="utf-8") as f:
         f.write(f"STM32 Stop-mode Validation Report\n")
         f.write(f"=" * 60 + "\n")
@@ -230,12 +238,21 @@ def main(argv: list[str] | None = None) -> int:
         f.write(f"Target:          {args.target_uA} µA\n")
         f.write(f"Tolerance:       ±{args.tolerance_uA} µA\n")
         f.write(f"Deviation:       {deviation_uA:+.3f} µA\n")
-        f.write(f"Verdict:         {'PASS' if verdict_pass else 'FAIL'}\n")
+        f.write(f"Min samples reqd:{MIN_STOP_SAMPLES}\n")
+        if too_few_samples:
+            f.write(f"Verdict:         FAIL (too few stop-window samples: "
+                    f"{n_stop} < {MIN_STOP_SAMPLES})\n")
+        else:
+            f.write(f"Verdict:         {'PASS' if verdict_pass else 'FAIL'}\n")
 
     print(f"CSV:     {csv_path}")
     print(f"Summary: {summary_path}")
     print()
 
+    if too_few_samples:
+        print(f"  ✗ FAIL — only {n_stop} stop-window samples "
+              f"(< {MIN_STOP_SAMPLES} required); cannot trust the verdict")
+        return 1
     if verdict_pass:
         print(f"  ✓ PASS — Stop-mode current {stop_mean_uA:.2f} µA within "
               f"±{args.tolerance_uA} µA of {args.target_uA} µA target")

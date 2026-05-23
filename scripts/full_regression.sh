@@ -37,7 +37,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENERGY_STUDY="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_FIRMWARE="$ENERGY_STUDY/firmware/amore-fw"
-RPI_HOST="${RPI_HOST:-10.232.131.169}"
+# FR1 fix: previous default (10.232.131.169) was a stale value left over
+# from an earlier network layout. The actual Pi confirmed by telemetry
+# on 2026-05-22 is 10.164.56.169. Override via env var if your setup differs.
+RPI_HOST="${RPI_HOST:-10.164.56.169}"
 RPI_USER="${RPI_USER:-pi}"
 TOLERANCE="0.05"  # ±5% per metric
 
@@ -83,6 +86,9 @@ log()    { echo -e "$(date '+%H:%M:%S') $*" | tee -a "$MASTER_LOG"; }
 pass()   { log "${GRN}  ✓ PASS${RST}: $*"; TOTAL_PASS=$((TOTAL_PASS+1)); }
 fail()   { log "${RED}  ✗ FAIL${RST}: $*"; TOTAL_FAIL=$((TOTAL_FAIL+1)); }
 warn()   { log "${YLW}  ! WARN${RST}: $*"; TOTAL_WARN=$((TOTAL_WARN+1)); }
+# FR2 fix: skip() was referenced in P0.6 but never defined. Calling it would
+# produce "skip: command not found" on systems missing ST-Link with --static-only.
+skip()   { log "${CYN}  - SKIP${RST}: $*"; }
 phase()  {
     log ""
     log "${BOLD}${BLU}═════════════════════════════════════════════════════════════${RST}"
@@ -361,8 +367,10 @@ else
         fail "regression_test.sh exited with non-zero status"
     fi
     
-    # Look for the regression artifact directory
-    REGRESSION_DIR=$(find "$REPO_FIRMWARE/logs" -maxdepth 1 -name "regression_2026*" -type d -newer "$LOG_DIR" 2>/dev/null | tail -1)
+    # Look for the regression artifact directory.
+    # FR6 fix: previously hardcoded "regression_2026*" which would silently
+    # stop matching in 2027. Match any year.
+    REGRESSION_DIR=$(find "$REPO_FIRMWARE/logs" -maxdepth 1 -name "regression_*" -type d -newer "$LOG_DIR" 2>/dev/null | tail -1)
     if [ -n "$REGRESSION_DIR" ]; then
         log ""
         log "P3.2 — Regression report"
@@ -465,9 +473,16 @@ if [ -f "$VAL_SCRIPT" ]; then
     P5_DUR=$(($(date +%s) - P5_START))
     log "P5 wall time: $((P5_DUR / 60))m $((P5_DUR % 60))s"
     
-    # Extract pass/fail counts from validation log
-    VAL_PASS=$(grep -c '✓ PASS' "$VAL_LOG" 2>/dev/null || echo "0")
-    VAL_FAIL=$(grep -c '✗ FAIL' "$VAL_LOG" 2>/dev/null || echo "0")
+    # Extract pass/fail counts from validation log.
+    # FR7 fix: `grep -c PATTERN file || echo 0` was producing TWO lines
+    # ("0\n0") when grep had no matches (grep -c prints "0" AND exits 1,
+    # so the fallback fired). The resulting multi-line string broke
+    # `[ "$VAL_FAIL" -eq 0 ]` with "integer expression expected".
+    # tr drops the newline so we always get a single integer.
+    VAL_PASS=$(grep -c '✓ PASS' "$VAL_LOG" 2>/dev/null | tr -d '\n')
+    VAL_FAIL=$(grep -c '✗ FAIL' "$VAL_LOG" 2>/dev/null | tr -d '\n')
+    : "${VAL_PASS:=0}"
+    : "${VAL_FAIL:=0}"
     
     if [ "$VAL_FAIL" -eq 0 ]; then
         PHASE_RESULTS+=("P5|PASS|$VAL_PASS checks passed")

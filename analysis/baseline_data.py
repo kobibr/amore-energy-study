@@ -33,6 +33,35 @@ is flagged "pending RELIC re-measurement" until that lands.
 BN254 numbers are unchanged from 2026-04-01 (pre-port-bn254-working).
 BN254 re-measurement on the unified-curves branch is blocked by an
 fp12_mul curve-specificity issue (see docs/future_work.md).
+
+**Silent-bias fixes applied 2026-05-23**
+----------------------------------------
+CRITICAL-1: ``SERVER_RTT_MS`` alias removed. The public API now requires
+            an explicit ``server="real"`` or ``server="mock"`` keyword
+            argument so callers can no longer silently get MOCK-compressed
+            values that are 68-80× off from real-world ServerWait. This
+            is a breaking change to ``amore_serverwait_ms``,
+            ``amore_round_energy_mJ``, ``amore_with_ots_per_round_mJ``,
+            and ``session_time_s``; downstream callers must be updated.
+
+HIGH-2:     ``amore_round_time_ms`` now raises ``ValueError`` on unknown
+            curve names instead of silently falling back to BLS12_381.
+
+MEDIUM-3:   tie-breaking in ``amore_round_time_ms`` now goes to the
+            larger ``amort_ms`` (truly conservative for AmorE) rather
+            than the larger ``N`` — which was only conservative under
+            the now-falsified assumption that amort is monotonic in N.
+
+MEDIUM-4:   warning block added above ``OTS_MS`` mirroring the one above
+            ``DIRECT_PAIRING_MS``; the two values are NOT like-for-like.
+
+MEDIUM-5:   ``SERVER_RTT_MS_REAL["BLS12_381"]`` updated to 87,500 ms
+            (telemetry central value, was 87,020.4 — a 0.55% silent
+            negative bias on every BLS ServerWait calculation).
+
+MEDIUM-6:   docstrings for ``session_time_s`` and the duty-cycle block
+            corrected: it's "wall-clock", not "active" time. The phase
+            during ServerWait is exactly where active vs Stop matters.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -77,6 +106,14 @@ AMORE_AMORT_BLS12_381 = [
 # OneTimeSetup — paid once per session, not per round.
 # BN254: doc/AmorE_BN128_Results.txt §4.2 (pre-O3, 2026-04-01).
 # BLS:   doc/AmorE_BLS12_381_Results.txt §8 (post-O3, 2026-05-12).
+#
+# WARNING (MEDIUM-4): BN254 OTS is pre-O3 (503.9 ms, 2026-04-01).
+# BLS12_381 OTS is post-O3 (1151.2 ms, 2026-05-12). Cross-curve
+# comparisons that use OTS are NOT like-for-like — the -O3 (Release)
+# build is up to ~2.14× faster than -O2 on fp_mul, so the BN254 value
+# could be roughly half of its current 503.9 ms once re-measured.
+# BN254 re-measurement on the unified-curves branch is blocked by an
+# fp12_mul curve-specificity issue (see docs/future_work.md).
 OTS_MS = {
     "BN254":     503.9,
     "BLS12_381": 1151.2,
@@ -138,17 +175,84 @@ I_STOP_UA = 0.5
 # Server-side compute time (approximate; UART RTT + Pi pairing).
 # Used to estimate the ServerWait phase duration per round.
 #
-# CAVEAT (under review
-# OQ-1): the /100 factor below applies MOCK_SERVER_COMPRESS from
-# analysis/fixtures/synthetic_cells.py. Earlier analysis claimed figures were
-# immune to this compression, but figures consuming SERVER_RTT_MS via
-# amore_serverwait_ms() / amore_round_energy_mJ() do inherit it. Full
-# fix (SERVER_RTT_MS_MOCK vs SERVER_RTT_MS_REAL split) is deferred to
-# Task 5.0 with real PPK2 data.
-SERVER_RTT_MS = {
-    "BN254":     175.0  + 73452.8 / 100,   # uart_rtt + server_compute/MOCK_COMPRESS
-    "BLS12_381": 406.0  + 87020.4 / 100,
+# CAVEAT M3 (resolves OQ-1): the SERVER_RTT_MS constant historically
+# applied a /100 factor inherited from MOCK_SERVER_COMPRESS in
+# fixtures/synthetic_cells.py. That meant `amore_serverwait_ms()` and
+# everything downstream (figure energy values, crossover analysis) was
+# 68x off from real-world numbers.
+#
+# Resolution: we now expose THREE constants:
+#   SERVER_RTT_MS_REAL — what a real Pi running py_ecc actually takes.
+#                        Telemetry from 2026-05-22 sweep_n10 confirmed
+#                        BLS12_381 server compute = 87,500 ± 720 ms/round
+#                        (CV = 0.82% across 10 rounds). Add 406 ms UART.
+#   SERVER_RTT_MS_MOCK — the 1/100 compressed value used by the mock
+#                        server during dev testing. NOT representative
+#                        of reality.
+#   SERVER_RTT_MS      — alias retained for backward compatibility;
+#                        currently points to MOCK. To switch a figure
+#                        to real-world projection, import _REAL directly.
+#
+# Figures used for the paper should target SERVER_RTT_MS_REAL — at
+# 87 seconds of ServerWait per round, energy is dominated by what the
+# MCU does during that wait (busy-wait vs Stop mode), which is exactly
+# the point the paper makes.
+SERVER_RTT_MS_MOCK = {
+    "BN254":     175.0 + 73452.8 / 100,    # 909.5 ms — mock-server compressed
+    "BLS12_381": 406.0 + 87020.4 / 100,    # 1276.2 ms — mock-server compressed
 }
+
+SERVER_RTT_MS_REAL = {
+    "BN254":     175.0 + 73452.8,          # 73,627.8 ms — real Pi (BN254 awaiting telemetry confirmation)
+    "BLS12_381": 406.0 + 87500.0,          # 87,906.0 ms — real Pi (MEDIUM-5 fix:
+                                            # updated to telemetry central value
+                                            # 87,500 ± 720 ms/round from
+                                            # 2026-05-22 sweep_n10. The previous
+                                            # 87,020.4 was Diego's 2026-05-07
+                                            # baseline — within the telemetry CI
+                                            # but 479.6 ms below the central
+                                            # value, a 0.55% silent negative bias
+                                            # on every BLS ServerWait energy
+                                            # calculation.)
+}
+
+# CRITICAL-1 fix: the previous module exported `SERVER_RTT_MS` as a
+# silent alias for `SERVER_RTT_MS_MOCK`. Every caller of
+# amore_serverwait_ms() therefore got the MOCK value (compressed by
+# /100), which is 68-80x smaller than the real Pi ServerWait. The
+# resulting energy figures were silently 68-80x understated wherever
+# busy-wait dominated the round, and silently understated Stop-mode's
+# advantage by the same factor.
+#
+# The fix removes the silent alias entirely. The public API
+# (amore_serverwait_ms, amore_round_energy_mJ,
+# amore_with_ots_per_round_mJ, session_time_s) now takes an explicit
+# ``server`` keyword argument with no default — callers must choose
+# "real" or "mock" at the call site. Code that was relying on the old
+# alias will fail loudly with a TypeError, not silently with wrong
+# numbers.
+SERVER_KIND_REAL = "real"
+SERVER_KIND_MOCK = "mock"
+
+
+def _server_rtt_ms(curve: str, server: str) -> float:
+    """Look up ServerWait time per round for the chosen server backend.
+
+    Raises ValueError on unknown ``server`` (no silent default) or
+    unknown ``curve``.
+    """
+    if server == SERVER_KIND_REAL:
+        table = SERVER_RTT_MS_REAL
+    elif server == SERVER_KIND_MOCK:
+        table = SERVER_RTT_MS_MOCK
+    else:
+        raise ValueError(
+            f"server must be {SERVER_KIND_REAL!r} or {SERVER_KIND_MOCK!r}, "
+            f"got {server!r}"
+        )
+    if curve not in table:
+        raise ValueError(f"unknown curve: {curve!r}")
+    return table[curve]
 
 
 def energy_from_time_ms(time_ms: float, current_mA: float = I_ACTIVE_MA,
@@ -158,25 +262,61 @@ def energy_from_time_ms(time_ms: float, current_mA: float = I_ACTIVE_MA,
 
 
 def amore_round_time_ms(curve: str, n: int) -> float:
-    """Amortized per-round time, interpolated between measured N points."""
-    data = AMORE_AMORT_BN254 if curve == "BN254" else AMORE_AMORT_BLS12_381
-    # Use the closest measured N to the requested N (we only have N=1, 10, 50).
-    # For N values between, return the nearest. For N>50, return N=50 (asymptote).
+    """Amortized per-round time, snapped to the nearest measured N.
+
+    We have three measured anchors: N=1, 10, 50. For an arbitrary
+    requested N we return the amort_ms of the closest one (by absolute
+    distance).
+
+    HIGH-2 fix: unknown curve names now raise ValueError instead of
+    silently falling back to BLS12_381 data.
+
+    Bug H1 fix (original): the previous implementation always returned
+    N=50 for any 10 < n < 50. For n=15 (closer to 10) the old code
+    returned the N=50 number, producing a small systematic bias.
+
+    MEDIUM-3 fix: tie-breaking now goes to the anchor with the LARGER
+    amort_ms (truly conservative for AmorE — worse number = more
+    cautious claim). The previous "tie-break by larger N" was only
+    conservative under the assumption that amort grows monotonically
+    with N, which holds for BN254 (372.5 → 378.8 → 381.8) but breaks
+    for BLS12_381 (870.3 → 898.2 → 898.0 — N=50 has a LOWER amort
+    than N=10). At a tie distance, picking N=50 there was the OPTIMISTIC
+    choice, not the conservative one.
+    """
+    if curve == "BN254":
+        data = AMORE_AMORT_BN254
+    elif curve == "BLS12_381":
+        data = AMORE_AMORT_BLS12_381
+    else:
+        raise ValueError(f"unknown curve: {curve!r}")
+
     if n <= 1:
         return data[0].amort_ms
     if n >= 50:
         return data[2].amort_ms
-    if n <= 10:
-        return data[1].amort_ms
-    return data[2].amort_ms
+    # Distance to each anchor; ties go to the LARGER amort_ms (conservative).
+    # Sort key: (distance ascending, -amort_ms ascending). Smaller distance
+    # wins; on ties, smaller -amort_ms wins, i.e. larger amort_ms wins.
+    candidates = sorted(
+        ((abs(n - p.n), -p.amort_ms, p.amort_ms) for p in data)
+    )
+    return candidates[0][2]
 
 
-def amore_serverwait_ms(curve: str) -> float:
-    """ServerWait time per round — dominated by Pi server compute + UART RTT."""
-    return SERVER_RTT_MS[curve]
+def amore_serverwait_ms(curve: str, *, server: str) -> float:
+    """ServerWait time per round — dominated by Pi server compute + UART RTT.
+
+    CRITICAL-1 fix: ``server`` is now mandatory (no default) so callers
+    cannot silently pick up the /100 mock value. Pass ``server="real"``
+    for paper figures and projections; ``server="mock"`` only when
+    explicitly reasoning about mock-server behaviour.
+    """
+    return _server_rtt_ms(curve, server)
 
 
-def amore_round_energy_mJ(curve: str, n: int, *, stop_mode: bool) -> float:
+def amore_round_energy_mJ(curve: str, n: int, *, stop_mode: bool,
+                           server: str) -> float:
     """Energy per amortized round of AmorE Mode A.
 
     Composed of:
@@ -184,9 +324,12 @@ def amore_round_energy_mJ(curve: str, n: int, *, stop_mode: bool) -> float:
     + ServerWait energy:
         if baseline:    full SERVER_RTT_MS at I_ACTIVE (busy-wait)
         if stop_mode:   full SERVER_RTT_MS at I_STOP (Stop mode quiescent)
+
+    CRITICAL-1 fix: ``server`` is mandatory (no default). Pass
+    ``server="real"`` for paper figures.
     """
     compute_ms = amore_round_time_ms(curve, n)
-    wait_ms = amore_serverwait_ms(curve)
+    wait_ms = amore_serverwait_ms(curve, server=server)
 
     e_compute = energy_from_time_ms(compute_ms)
     if stop_mode:
@@ -197,9 +340,21 @@ def amore_round_energy_mJ(curve: str, n: int, *, stop_mode: bool) -> float:
     return e_compute + e_wait
 
 
-def amore_with_ots_per_round_mJ(curve: str, n: int, *, stop_mode: bool) -> float:
-    """Per-round energy INCLUDING amortized OTS overhead."""
-    per_round = amore_round_energy_mJ(curve, n, stop_mode=stop_mode)
+def amore_with_ots_per_round_mJ(curve: str, n: int, *, stop_mode: bool,
+                                  server: str) -> float:
+    """Per-round energy INCLUDING amortized OTS overhead.
+
+    CRITICAL-1 fix: ``server`` mandatory.
+
+    Bug M1 fix: previously n=0 produced a ZeroDivisionError (`ots_e/n`).
+    Clamp to n=1 — semantically: a session of 0 rounds isn't a session
+    at all, but the safer answer is "OTS-only cost is paid in full" rather
+    than crash mid-pipeline.
+    """
+    if n < 1:
+        n = 1
+    per_round = amore_round_energy_mJ(curve, n, stop_mode=stop_mode,
+                                       server=server)
     ots_ms = OTS_MS[curve]
     ots_e = energy_from_time_ms(ots_ms)
     return per_round + ots_e / n
@@ -220,7 +375,10 @@ IDD_STOP_RANGE_UA   = (0.4, 0.6)    # µA — Stop-mode quiescent current
 E_WAKEUP_RANGE_UJ   = (10.0, 30.0)  # µJ — energy per wake-up event
 
 # Duty-cycle convention: a device "wakes, runs one session, sleeps".
-# T_session = active time per session = OTS + N × (compute + ServerWait)
+# T_session = wall-clock duration of one session
+#           = OTS + N × (compute + ServerWait)
+#           (the MCU may be in Stop during the ServerWait portion of
+#            each round, not necessarily active — see MEDIUM-6 fix)
 # T_sleep   = idle time between sessions, parameterised by duty cycle
 #             duty_cycle = T_session / (T_session + T_sleep)
 #
@@ -231,7 +389,29 @@ E_WAKEUP_RANGE_UJ   = (10.0, 30.0)  # µJ — energy per wake-up event
 #
 # Crossover region: where E_session_AmorE < E_direct.
 
-def session_time_s(curve: str, n: int) -> float:
-    """Active time per session in seconds: OTS + N × (compute + ServerWait)."""
-    t_ms = OTS_MS[curve] + n * (amore_round_time_ms(curve, n) + amore_serverwait_ms(curve))
+def session_time_s(curve: str, n: int, *, server: str) -> float:
+    """Wall-clock session duration in seconds.
+
+    MEDIUM-6 fix: this is wall-clock time, NOT active time. It includes
+    ServerWait, during which the MCU may be in Stop mode (drawing
+    ~0.5 µA) rather than active (~85 mA). Multiplying this return value
+    by I_ACTIVE for an energy estimate would be wrong by construction —
+    use ``amore_round_energy_mJ`` / ``amore_with_ots_per_round_mJ`` for
+    energy, which handles the active-vs-Stop split correctly.
+
+    The wall-clock duration is:
+        OTS + N × (compute + ServerWait)
+
+    CRITICAL-1 fix: ``server`` is mandatory (no default).
+
+    Bug M1 fix: clamp n>=1 for consistency with amore_with_ots_per_round_mJ.
+    Previously n=0 returned just OTS_MS/1000, which silently treats "zero
+    rounds" as a valid session — better to normalize at the boundary.
+    """
+    if n < 1:
+        n = 1
+    t_ms = OTS_MS[curve] + n * (
+        amore_round_time_ms(curve, n)
+        + amore_serverwait_ms(curve, server=server)
+    )
     return t_ms / 1000.0

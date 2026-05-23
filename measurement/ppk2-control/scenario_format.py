@@ -74,6 +74,16 @@ def parse_scenario(source: IO[str]) -> Iterator[GPIOEvent]:
         except ValueError:
             print(f"WARN: parse error: {raw!r}", file=sys.stderr)
             continue
+        # Bug #7 fix: a negative delay would silently move t_us backwards
+        # and produce a non-monotonic stream that only blows up later in
+        # interpolate_to_fixed_rate with an index-based error message
+        # that's hard to map back to the scenario file. Catch at source.
+        if delay_ms < 0:
+            print(
+                f"WARN: negative delay_ms ignored: {raw!r}",
+                file=sys.stderr,
+            )
+            continue
         if not 0 <= gb <= 0xFF:
             print(
                 f"WARN: gpio_byte out of range [0, 255]: {gb}",

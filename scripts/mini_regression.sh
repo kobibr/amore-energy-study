@@ -19,7 +19,10 @@
 # spot exactly where the chain broke.
 
 set -uo pipefail   # NOT -e — we want to see all failures, not just the first
-ES=~/amore-energy-study
+# M6 fix: previously hardcoded `ES=~/amore-energy-study`, which broke
+# if the user cloned to a different path or ran the script from a CI
+# checkout. Self-locate via BASH_SOURCE, matching sanity_check.sh.
+ES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ES}"
 
 # colours for output

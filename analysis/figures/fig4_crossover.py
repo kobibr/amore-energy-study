@@ -18,12 +18,12 @@ from analysis.baseline_data import (
 
 
 def amore_active_time_s(curve, n):
-    t_ms = OTS_MS[curve] + n * (amore_round_time_ms(curve, n) + amore_serverwait_ms(curve))
+    t_ms = OTS_MS[curve] + n * (amore_round_time_ms(curve, n) + amore_serverwait_ms(curve, server="real"))
     return t_ms / 1000.0
 
 
 def amore_active_energy_mJ(curve, n):
-    return n * amore_with_ots_per_round_mJ(curve, n, stop_mode=True)
+    return n * amore_with_ots_per_round_mJ(curve, n, stop_mode=True, server="real")
 
 
 def direct_active_time_s(curve, n):

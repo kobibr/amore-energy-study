@@ -52,8 +52,24 @@ ANCHORS: dict[str, dict[str, float]] = {
 # ─────────────────────────────────────────────────────────────────────
 # Payload model (from firmware/amore-fw/inc/amore_uart.h)
 # ─────────────────────────────────────────────────────────────────────
-AMORE_SETUP_BYTES = 576
-AMORE_RESULT_BYTES = 1152
+# IMPORTANT (Bug H2): these are PER-ROUND payloads for AmorE Mode A.
+# Each round transmits one Setup message and receives one Result.
+# OneTimeSetup is computed client-side, not communicated, so it adds
+# no comm cost. Total AmorE comm for N rounds = N × these payloads
+# (just like Direct).
+#
+# Consequence: there is NO true "comm-only crossover" between AmorE
+# and Direct — both grow linearly with N, and Direct's per-pairing
+# payload is smaller (720 B vs AmorE's 1730 B per round), so Direct
+# is always cheaper on comm alone. The compute-side amortization is
+# what makes AmorE win on TOTAL energy, not comm.
+#
+# The "Comm-only crossover" output below is therefore re-framed as
+# an OVERHEAD RATIO: how many Direct pairings cost the same in comm
+# as one AmorE round. Useful for sizing comm-link budget but NOT a
+# break-even point for AmorE.
+AMORE_SETUP_BYTES = 576       # per round, one Setup message
+AMORE_RESULT_BYTES = 1152     # per round, one Result message (γ + ρ)
 AMORE_STATUS_BYTES = 1
 AMORE_READY_BYTES = 1
 
@@ -61,7 +77,29 @@ AMORE_UPLINK_BYTES = AMORE_SETUP_BYTES + AMORE_STATUS_BYTES
 AMORE_DOWNLINK_BYTES = AMORE_RESULT_BYTES + AMORE_READY_BYTES
 AMORE_TOTAL_BYTES = AMORE_UPLINK_BYTES + AMORE_DOWNLINK_BYTES
 
-# Direct pairing (BLS12-381 compressed group elements)
+# Direct pairing payload (BLS12-381).
+#
+# Bug #5 fix (silent-bias review 2026-05-23): the previous comment
+# called these "compressed group elements" but 576 B is the size of
+# an UNCOMPRESSED Fp12 element (12 × 48 B), i.e. the full pairing
+# result, not a compressed group element. For reference:
+#   compressed G1 = 48 B    ← appears in DIRECT_PAIRING_UPLINK_BYTES
+#   compressed G2 = 96 B    ← appears in DIRECT_PAIRING_UPLINK_BYTES
+#   Fp12 uncompressed = 576 B = DIRECT_PAIRING_DOWNLINK_BYTES
+#   Fp12 half-compressed (Edwards form) ≈ 288 B  ← NOT used here
+#
+# Compression policy: we model the direct pairing as RETURNING the
+# full uncompressed Fp12 result. This is what RELIC's pp_map_oatep_k12
+# emits over UART in our reference implementation. It is conservative
+# vs. half-compressed Fp12 (288 B) in the sense that it OVERSTATES
+# Direct's downlink bytes by 2×, which makes Direct look more comm-
+# expensive than it might be with compression. If you switch the
+# reference impl to half-compressed Fp12 downlink:
+#   DIRECT_PAIRING_DOWNLINK_BYTES = 288
+#   AMORE_RESULT_BYTES            = 576  (= 2 × 288, γ + ρ)
+# and rerun the comm projection. The AmorE-vs-Direct comm conclusion
+# below (Direct always cheaper) does not flip — the change just
+# narrows the gap.
 DIRECT_PAIRING_UPLINK_BYTES = 48 + 96
 DIRECT_PAIRING_DOWNLINK_BYTES = 576
 
@@ -177,13 +215,18 @@ def main(argv: list[str] | None = None) -> int:
                 "E_total_mJ": direct["E_total_mJ"],
             })
 
-        # Crossover: at what N does Direct comm overtake AmorE comm?
+        # Bug H2 fix: the so-called "crossover" is actually a per-round
+        # overhead ratio. Both AmorE and Direct comm costs grow linearly
+        # with N, so the lines never actually cross in N. What we CAN
+        # show is the per-round overhead: how many Direct pairings cost
+        # the same comm energy as one AmorE round.
         per_pairing = project_direct(1, anchor)
         if per_pairing["E_total_mJ"] > 0:
-            N_crossover = amore["E_total_mJ"] / per_pairing["E_total_mJ"]
-            print(f"\n  Comm-only crossover (Direct ≥ AmorE):"
-                  f"  N ≈ {N_crossover:.2f} pairings")
-            print(f"  (Below this N, Direct comms is cheaper; AmorE wins above.)")
+            overhead_ratio = amore["E_total_mJ"] / per_pairing["E_total_mJ"]
+            print(f"\n  AmorE per-round comm overhead vs Direct per-pairing:")
+            print(f"  one AmorE round ≈ {overhead_ratio:.2f} Direct pairings (in comm energy)")
+            print(f"  Direct is always cheaper on comm alone; AmorE wins on")
+            print(f"  total energy via compute-side amortization (OTS).")
 
     # CSV output
     if args.csv_out:

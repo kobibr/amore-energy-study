@@ -90,68 +90,106 @@ def run_real_mode(args: argparse.Namespace) -> int:
     hosts that don't have it (where only fake-stdin mode is needed).
     """
     import lgpio  # noqa: PLC0415 — lazy import for cross-platform usability
+    import threading  # noqa: PLC0415 — only needed in real-mode
 
     pins = [args.pa0, args.pa1, args.pa4]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # Bug #4 fix: claim the gpiochip handle inside a try/finally that
+    # guarantees its release even if subsequent setup (fp.open, pin
+    # claim, etc.) raises. Previously a failure in out.open() would
+    # leak the chip handle.
     h = lgpio.gpiochip_open(args.chip)
-
-    # Track current level per pin so we can pack a fresh gpio_byte on
-    # every edge.
-    level = {p: 0 for p in pins}
-
-    # lgpio callbacks deliver ts in nanoseconds since a monotonic epoch;
-    # we record offsets from the first edge so the CSV starts at t=0.
-    start_ns: int | None = None
-
-    fp = out.open("w", encoding="utf-8")
-    fp.write(CSV_HEADER + "\n")
-    fp.flush()
-
-    def on_edge(_chip: int, gpio: int, lvl: int, ts_ns: int) -> None:
-        nonlocal start_ns
-        if lvl not in (0, 1):
-            return  # 2 = watchdog, 3 = glitch — not signal data
-        if start_ns is None:
-            start_ns = ts_ns
-        level[gpio] = lvl
-        ts_us = (ts_ns - start_ns) // 1000
-        gb = gpio_byte_from_levels(
-            level[args.pa0], level[args.pa1], level[args.pa4]
-        )
-        fp.write(f"{ts_us},{gb}\n")
-
-    callbacks: list[object] = []
     try:
-        for p in pins:
-            try:
-                lgpio.gpio_free(h, p)
-            except Exception:
-                pass
-            lgpio.gpio_claim_input(h, p)  # no internal pull — STM32 drives push-pull
-            callbacks.append(lgpio.callback(h, p, lgpio.BOTH_EDGES, on_edge))
+        # Track current level per pin so we can pack a fresh gpio_byte on
+        # every edge.
+        level = {p: 0 for p in pins}
 
+        # lgpio callbacks deliver ts in nanoseconds since a monotonic epoch;
+        # we record offsets from the first edge so the CSV starts at t=0.
+        start_ns: int | None = None
+
+        # Bug #3 fix: callbacks fire on the lgpio worker thread and may
+        # still be executing when the main thread reaches finally. The
+        # Lock serializes writes and also gates the live-vs-closed check:
+        # once fp_closed is set under the lock, callbacks see it and
+        # skip the write, so close() in finally cannot race a write.
+        fp_lock = threading.Lock()
+        fp_closed = False
+
+        fp = out.open("w", encoding="utf-8")
         try:
-            time.sleep(args.duration)
-        except KeyboardInterrupt:
-            pass
+            fp.write(CSV_HEADER + "\n")
+            fp.flush()
+
+            def on_edge(_chip: int, gpio: int, lvl: int, ts_ns: int) -> None:
+                nonlocal start_ns
+                if lvl not in (0, 1):
+                    return  # 2 = watchdog, 3 = glitch — not signal data
+                with fp_lock:
+                    if fp_closed:
+                        return
+                    if start_ns is None:
+                        start_ns = ts_ns
+                    level[gpio] = lvl
+                    ts_us = (ts_ns - start_ns) // 1000
+                    gb = gpio_byte_from_levels(
+                        level[args.pa0], level[args.pa1], level[args.pa4]
+                    )
+                    fp.write(f"{ts_us},{gb}\n")
+
+            callbacks: list[object] = []
+            try:
+                for p in pins:
+                    try:
+                        lgpio.gpio_free(h, p)
+                    except Exception:
+                        pass
+                    lgpio.gpio_claim_input(h, p)  # no internal pull — STM32 drives push-pull
+                    callbacks.append(lgpio.callback(h, p, lgpio.BOTH_EDGES, on_edge))
+
+                try:
+                    time.sleep(args.duration)
+                except KeyboardInterrupt:
+                    pass
+            finally:
+                # 1. Cancel callbacks (best-effort; may not block until in-flight ones finish)
+                for cb in callbacks:
+                    try:
+                        cb.cancel()
+                    except Exception:
+                        pass
+                # 2. Free the pins so cancelled callbacks have nothing to fire on
+                for p in pins:
+                    try:
+                        lgpio.gpio_free(h, p)
+                    except Exception:
+                        pass
+                # 3. Bug #3 fix: gate further fp writes via the lock+flag
+                #    so any callback already past the lvl check but not yet
+                #    inside the critical section will see fp_closed=True
+                #    and bail out before touching fp.
+                with fp_lock:
+                    fp_closed = True
+        finally:
+            try:
+                fp.close()
+            except Exception:
+                pass
     finally:
-        for cb in callbacks:
-            try:
-                cb.cancel()
-            except Exception:
-                pass
-        for p in pins:
-            try:
-                lgpio.gpio_free(h, p)
-            except Exception:
-                pass
-        lgpio.gpiochip_close(h)
-        fp.close()
+        try:
+            lgpio.gpiochip_close(h)
+        except Exception:
+            pass
+
     # Warn if no edges captured — symptom of a wiring or pinmux problem
     # that the CSV header alone wouldn't reveal.
-    written_lines = sum(1 for _ in out.open(encoding="utf-8")) - 1
+    # Bug #8 fix: use a context manager so the file handle is closed
+    # promptly (CPython would close it via GC, but PyPy / Jython do not
+    # guarantee that, and lint tools warn on ResourceWarning).
+    with out.open(encoding="utf-8") as f:
+        written_lines = sum(1 for _ in f) - 1
     if written_lines == 0:
         import sys as _sys
         print(

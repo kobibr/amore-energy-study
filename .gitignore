@@ -58,3 +58,8 @@ report/*.synctex.gz
 report/main.tex.before_*
 report/main.tex.bak
 
+
+# Local tooling
+commit_and_sanity.sh
+do_everything.sh
+analysis/dedekind_discovery_final_v46.md

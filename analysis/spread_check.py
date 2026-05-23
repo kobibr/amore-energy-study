@@ -109,9 +109,18 @@ def detect_cell_instances(rows: list[dict]) -> list[CellInstance]:
     prev_row = rows[0]
 
     for row in rows[1:]:
+        # Bug #1 fix: compute this interval's energy contribution FIRST,
+        # using prev_row's values (left-edge integration). Previously this
+        # block ran AFTER the transition check, which meant the interval
+        # between A's last sample and B's first sample was credited to B
+        # instead of A — contaminating B's energy with A's tail.
+        dt_s = (row["timestamp_us"] - prev_row["timestamp_us"]) / 1e6
+        seg_energy_uJ += prev_row["current_uA"] * prev_row["voltage_V"] * dt_s
+
         # Has the gpio_byte changed?
         if row["gpio_byte"] != current_byte:
-            # Close out the current segment
+            # Close out the current segment (now correctly includes the
+            # transition interval since we added it above).
             instances.append(CellInstance(
                 gpio_byte=current_byte,
                 first_ts_us=seg_start_ts,
@@ -124,11 +133,6 @@ def detect_cell_instances(rows: list[dict]) -> list[CellInstance]:
             seg_start_ts = row["timestamp_us"]
             seg_n = 0
             seg_energy_uJ = 0.0
-
-        # Add energy contribution from prev_row -> row interval
-        dt_s = (row["timestamp_us"] - prev_row["timestamp_us"]) / 1e6
-        # Use prev_row's current and voltage (left-edge integration)
-        seg_energy_uJ += prev_row["current_uA"] * prev_row["voltage_V"] * dt_s
 
         seg_last_ts = row["timestamp_us"]
         seg_n += 1

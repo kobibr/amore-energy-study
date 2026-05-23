@@ -122,7 +122,15 @@ git fetch --quiet origin main 2>/dev/null || warn "fetch failed (offline?)"
 OUTER_LOCAL=$(git rev-parse HEAD)
 OUTER_REMOTE=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
 
-if [ "${OUTER_LOCAL}" != "${OUTER_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
+# S3 fix: if we couldn't resolve origin/main (offline, no remote configured,
+# or branch missing), the previous code compared a SHA to the literal string
+# "unknown" and reported "NOT PUSHED TO REMOTE" — which is misleading.
+# Distinguish the two failure modes.
+if [ "${OUTER_REMOTE}" = "unknown" ] && [ "${FORCE}" -eq 0 ]; then
+    warn "Outer repo: could not resolve origin/main (offline? no remote?)"
+    warn "  Treating gate as passed conditional on next online sanity_check."
+    info "  local: ${OUTER_LOCAL:0:7}"
+elif [ "${OUTER_LOCAL}" != "${OUTER_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
     big_fail "OUTER REPO NOT PUSHED TO REMOTE"
     echo -e "${RED}  local:  ${OUTER_LOCAL:0:7}${RST}"
     echo -e "${RED}  remote: ${OUTER_REMOTE:0:7}${RST}"
@@ -170,7 +178,12 @@ head_ "━━━ Gate 4/4: firmware submodule pushed ━━━"
 git fetch --quiet origin main 2>/dev/null || warn "fetch failed (offline?)"
 SUB_REMOTE=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
 
-if [ "${SUB_LOCAL}" != "${SUB_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
+# S3 fix: same "unknown" handling as outer gate.
+if [ "${SUB_REMOTE}" = "unknown" ] && [ "${FORCE}" -eq 0 ]; then
+    warn "Submodule: could not resolve origin/main (offline? no remote?)"
+    warn "  Treating gate as passed conditional on next online sanity_check."
+    info "  local: ${SUB_LOCAL:0:7}"
+elif [ "${SUB_LOCAL}" != "${SUB_REMOTE}" ] && [ "${FORCE}" -eq 0 ]; then
     big_fail "FIRMWARE SUBMODULE NOT PUSHED TO REMOTE"
     echo -e "${RED}  local:  ${SUB_LOCAL:0:7}${RST}"
     echo -e "${RED}  remote: ${SUB_REMOTE:0:7}${RST}"

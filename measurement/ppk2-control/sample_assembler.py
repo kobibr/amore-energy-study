@@ -60,10 +60,17 @@ def assemble_samples(
             via ``set_source_voltage``. Constant within a session, per
             spec §5.1. Stored as the ``voltage_V`` field of every
             emitted sample.
-        stop_mode: if True and a sample's ``gpio_byte == 0``, draw the
-            current from the Stop-mode model instead of the active-idle
-            model (~0.5 µA instead of ~50 mA). Mode is set per-session
-            via the wire protocol's ``set_stop_mode`` command.
+        stop_mode: session-wide Stop-mode flag set per-session via the
+            wire protocol's ``set_stop_mode`` command. Bug #3 note:
+            this is passed through to ``current_synthesis.sample_current``
+            unconditionally. The actual gating is performed there:
+            ``model_for(gb, stop_mode=stop_mode)`` only applies the
+            Stop-mode model when ``gpio_byte == 0``; for any other
+            ``gpio_byte`` the flag is a no-op and the regular
+            active-phase model is used. So you can think of this
+            parameter as "enable Stop-mode for the idle gpio_byte=0
+            samples in this session", not "force Stop-mode for every
+            sample".
         rng: optional ``random.Random`` for reproducibility. None →
             module-level random state.
 
@@ -72,12 +79,31 @@ def assemble_samples(
         one per input gpio_sample.
 
     Raises:
-        ValueError: if ``voltage_mV < 0`` or any gpio_byte is invalid
-            (range is enforced by ``current_synthesis`` and
-            ``csv_format`` in the same way).
+        ValueError: if ``voltage_mV < 0``. (Range validation for
+            ``gpio_byte`` is enforced by ``current_synthesis`` and
+            ``csv_format``.)
+
+    Bug #1 fix
+    ----------
+    Validation now runs eagerly at call time. The generator body has
+    been moved to ``_assemble_samples_impl``; this wrapper performs
+    pre-flight checks and *returns* the inner generator. Without this
+    split, the ``ValueError`` for negative ``voltage_mV`` would only
+    fire when the caller started iterating, far from the call site
+    that supplied the bad argument.
     """
     if voltage_mV < 0:
         raise ValueError(f"voltage_mV must be non-negative, got {voltage_mV}")
+    return _assemble_samples_impl(gpio_samples, voltage_mV, stop_mode, rng)
+
+
+def _assemble_samples_impl(
+    gpio_samples: Iterable[GPIOSampleAtRate],
+    voltage_mV: int,
+    stop_mode: bool,
+    rng: random.Random | None,
+) -> Iterator[Sample]:
+    """Inner generator. Validation must already have run in the wrapper."""
     voltage_V = voltage_mV / 1000.0
 
     for ts_us, gpio_byte in gpio_samples:

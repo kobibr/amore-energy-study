@@ -607,7 +607,10 @@ check_K1() {
 
 check_K3() {
     # RPi python pin (py_ecc version recorded somewhere)
-    if grep -qE "py_ecc.*==|py-ecc.*==" docs/ measurement/ 2>/dev/null; then
+    # AC14 fix: previously this used `grep -qE ... docs/ measurement/` without
+    # -r — grep treats directory args as errors when not recursive, so the
+    # check was silently always-WARN regardless of whether deps were pinned.
+    if grep -rqE "py_ecc.*==|py-ecc.*==" docs/ measurement/ 2>/dev/null; then
         report "K3" "RPi python deps pinned" PASS ""
     else
         report "K3" "RPi python deps pinned" WARN "no version pin found"
@@ -666,15 +669,46 @@ echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  Repo: ${ES}"
 echo
 
-CATEGORY="${1:-all}"
-case "$CATEGORY" in
-    --category)
-        CATEGORY="$2"
-        ;;
-    all|"")
-        CATEGORY="all"
-        ;;
-esac
+CATEGORY="all"
+# AC1 fix: previously the parser only handled --category and crashed
+# with "Unknown category: --json" on the documented --json flag.
+# Replaced ad-hoc positional parsing with a proper loop that recognizes
+# all three documented forms.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --category)
+            CATEGORY="${2:-all}"
+            shift 2
+            ;;
+        --json)
+            if [ -z "${2:-}" ]; then
+                echo "FATAL: --json requires a path argument" >&2
+                exit 2
+            fi
+            JSON_OUT="$2"
+            shift 2
+            ;;
+        -h|--help)
+            sed -n '1,30p' "$0"
+            exit 0
+            ;;
+        all)
+            CATEGORY="all"
+            shift
+            ;;
+        *)
+            # Bareword category (e.g., "A") in legacy form
+            if [ "${1:0:1}" != "-" ] && [ -z "${POSITIONAL_SEEN:-}" ]; then
+                CATEGORY="$1"
+                POSITIONAL_SEEN=1
+                shift
+            else
+                echo "Unknown argument: $1" >&2
+                exit 2
+            fi
+            ;;
+    esac
+done
 
 if [ "$CATEGORY" = "all" ]; then
     run_category_A

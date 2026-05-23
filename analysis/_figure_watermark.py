@@ -41,12 +41,23 @@ def add_watermark(fig, *, scenario: str = "BASELINE") -> None:
         The matplotlib Figure to annotate.
     scenario
         Either "BASELINE" or "WITH_STOP". Selects the disclaimer text.
+        Bug M5 fix: rejects anything else with ValueError. The whole
+        point of this helper is "figures cannot be silently misread";
+        a quiet fallback to WITH_STOP on a typo defeats that.
 
     The watermark is placed at the bottom-right of the figure in a
     semi-transparent box. Small enough not to dominate the figure, big
     enough not to be overlooked.
     """
-    text = WATERMARK_TEXT_BASELINE if scenario == "BASELINE" else WATERMARK_TEXT_WITH_STOP
+    if scenario == "BASELINE":
+        text = WATERMARK_TEXT_BASELINE
+    elif scenario == "WITH_STOP":
+        text = WATERMARK_TEXT_WITH_STOP
+    else:
+        raise ValueError(
+            f"unknown scenario: {scenario!r}. "
+            "Expected 'BASELINE' or 'WITH_STOP' (case-sensitive)."
+        )
     fig.text(
         0.99, 0.01, text,
         fontsize=7, color="darkred",

@@ -138,14 +138,21 @@ def _plot_one_scenario(ax, traces_dir: Path, curve_prefix: str,
                label=f"asymptote ({m.asymptote()*1000:.1f} mJ)")
 
     # Threshold lines + crossover annotations
-    has_crossover = False
+    # Bug #4 fix: distinguish "no crossover up to n_max" from "crossover
+    # exists but off the x-axis". Previously both produced the misleading
+    # title "NO crossover in [1,100]".
+    crossover_msgs: list[str] = []
     for k, ls in [(1, "--"), (3, "-.")]:
         threshold = k * e_direct * 1000
         ax.axhline(threshold, color="gray", linestyle=ls, alpha=0.8,
                    label=f"k={k} × direct ({threshold:.1f} mJ)")
         n_star = find_crossover(m, e_direct, k=k, n_max=200)
-        if n_star is not None and 1 <= n_star <= 100:
-            has_crossover = True
+        if n_star is None:
+            crossover_msgs.append(f"k={k}: no crossover ≤200")
+        elif n_star > 100:
+            crossover_msgs.append(f"k={k}: N*={n_star} (off-axis)")
+        else:
+            crossover_msgs.append(f"k={k}: ✓ N*={n_star}")
             ax.axvline(n_star, color="red" if k == 1 else "darkred",
                        linestyle=":", alpha=0.5)
             ax.annotate(f"N*={n_star} (k={k})",
@@ -161,7 +168,7 @@ def _plot_one_scenario(ax, traces_dir: Path, curve_prefix: str,
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=7, loc="best")
 
-    return "✓ crossover found" if has_crossover else "NO crossover in [1,100]"
+    return " | ".join(crossover_msgs) if crossover_msgs else "no thresholds"
 
 
 def main():

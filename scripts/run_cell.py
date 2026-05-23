@@ -70,16 +70,72 @@ class Cell:
 # Idempotency
 # ---------------------------------------------------------------------------
 
-def is_run_complete(csv_path: Path) -> bool:
-    """True iff the CSV has at least one sample row beyond the header."""
+# Bug #2 fix (silent-bias review 2026-05-23): a replica is "complete"
+# only when its last sample timestamp covers the requested duration.
+# The previous heuristic — "at least one sample row beyond the header"
+# — accepted a crashed-after-one-sample CSV as complete, marked it
+# [skip] on every subsequent invocation, and silently injected a
+# truncated replica into all variance statistics. The CV for that cell
+# would look beautifully low (because the truncated replica had no
+# time for noise), masking the corruption.
+#
+# Tolerance of 10% is generous: at 100 ksps × 30 s the PPK2 sometimes
+# returns 27-29 s of samples before stop_measuring fires; this still
+# counts as complete. A genuinely-crashed replica typically has
+# either zero or a handful of samples, well below the 90% threshold.
+COMPLETION_TOLERANCE_FRAC = 0.10
+
+
+def is_run_complete(csv_path: Path, expected_duration_s: float) -> bool:
+    """True iff the CSV's last sample timestamp covers expected_duration_s.
+
+    Reads the tail of the file rather than counting lines or scanning
+    the whole CSV — at 100 ksps × 30 s a trace can be 3M lines and
+    we don't want this check to dominate orchestrator wall-clock.
+
+    Returns False on any of:
+      - file does not exist
+      - file too small to contain header + any data row
+      - last data row has a malformed timestamp
+      - last data row's timestamp is below
+        ``expected_duration_s × (1 - COMPLETION_TOLERANCE_FRAC) × 1e6``
+
+    Side effect: NONE. This is a pure read; if False is returned the
+    orchestrator will overwrite the file on the next replica attempt.
+    """
     if not csv_path.is_file():
         return False
     try:
-        with csv_path.open() as f:
-            f.readline()
-            return bool(f.readline().strip())
-    except OSError:
+        size = csv_path.stat().st_size
+        if size == 0:
+            return False
+        # Read the last few KB to find the last non-empty line. We
+        # avoid loading 3M rows just to check the tail. A small file
+        # (just header, or header + a few rows) is read entirely.
+        tail_window = min(size, 4096)
+        with csv_path.open("rb") as f:
+            f.seek(-tail_window, 2)  # seek from end
+            tail = f.read().decode("utf-8", errors="replace")
+        # Last non-empty line in the tail
+        lines = [ln for ln in tail.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            # Need at minimum: header (if window covers it) + 1 data
+            # row, OR if window is past the header, 1+ data rows.
+            # Either way, fewer than 2 lines is suspect.
+            if len(lines) < 1:
+                return False
+            # Fall through with just one line — could be the only
+            # data row in the file; still validate its timestamp.
+        last_line = lines[-1]
+        # First field is timestamp_us (matches CSV_HEADER ordering).
+        ts_str = last_line.split(",", 1)[0].strip()
+        last_ts_us = int(ts_str)
+    except (OSError, ValueError, IndexError):
         return False
+    expected_min_us = int(
+        expected_duration_s * 1e6 * (1.0 - COMPLETION_TOLERANCE_FRAC)
+    )
+    return last_ts_us >= expected_min_us
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +167,28 @@ def run_cell(cell: Cell, backend) -> int:
     n_skip = 0
     t0 = time.time()
 
+    # Bug #3 fix (silent-bias review): per-replica durations now go
+    # into manifest.json so an auditor can detect truncations even
+    # without re-parsing CSVs. The single ``wall_s_total`` field
+    # alone hid which (if any) replicas ran short.
+    replica_records: list[dict] = []
+
     for i in range(1, cell.replicas + 1):
         csv_path = cell.cell_dir / f"run_{i:03d}.csv"
 
-        if is_run_complete(csv_path):
+        # Bug #2 fix: pass duration so completion check verifies that
+        # the trace actually covers expected wall-clock time, not just
+        # "has >=1 sample row beyond header".
+        if is_run_complete(csv_path, cell.duration_s):
             print(f"  [skip] {csv_path.name} already complete")
             n_skip += 1
             n_ok += 1
+            replica_records.append({
+                "index": i,
+                "csv": csv_path.name,
+                "status": "skipped_complete",
+                "duration_actual_s": None,
+            })
             continue
 
         print(f"  [start] {csv_path.name}  duration={cell.duration_s}s src={cell.gpio_source}")
@@ -128,13 +199,57 @@ def run_cell(cell: Cell, backend) -> int:
             log_dir=cell.cell_dir,
         )
 
+        # Bug #3 fix (silent-bias review): verify that the replica
+        # actually ran for ~duration_s. Without this, a backend that
+        # returns ok=True with duration_actual_s = 5s for a 30s cell
+        # passes through to the manifest unflagged AND is then
+        # re-marked [skip] by the new is_run_complete (which catches
+        # short traces) — but only if the CSV reflects the truncation.
+        # A backend that *did* write the full expected wall but failed
+        # mid-stream could still slip through. This duration check
+        # catches the backend-side report; is_run_complete catches the
+        # file-side state. Two layers, different failure modes.
+        duration_min_s = cell.duration_s * (1.0 - COMPLETION_TOLERANCE_FRAC)
+        if result.ok and result.duration_actual_s < duration_min_s:
+            print(
+                f"  [fail] {csv_path.name} short: "
+                f"actual={result.duration_actual_s:.1f}s "
+                f"< {duration_min_s:.1f}s "
+                f"({(1-COMPLETION_TOLERANCE_FRAC)*100:.0f}% of {cell.duration_s}s)"
+            )
+            result = result.__class__(
+                ok=False,
+                csv_path=result.csv_path,
+                sample_count=result.sample_count,
+                duration_actual_s=result.duration_actual_s,
+                error_message=(
+                    f"replica short: {result.duration_actual_s:.1f}s "
+                    f"< {duration_min_s:.1f}s (tolerance "
+                    f"{COMPLETION_TOLERANCE_FRAC*100:.0f}%)"
+                ),
+            ) if hasattr(result, "__class__") else result
+
         if result.ok:
             print(f"  [done] {csv_path.name}  ({result.sample_count} samples, "
                   f"{result.duration_actual_s:.1f}s wall)")
             n_ok += 1
+            replica_records.append({
+                "index": i,
+                "csv": csv_path.name,
+                "status": "ok",
+                "sample_count": result.sample_count,
+                "duration_actual_s": round(result.duration_actual_s, 3),
+            })
         else:
             print(f"  [fail] {csv_path.name}  → {result.error_message}")
             n_fail += 1
+            replica_records.append({
+                "index": i,
+                "csv": csv_path.name,
+                "status": "fail",
+                "duration_actual_s": round(result.duration_actual_s, 3),
+                "error_message": result.error_message,
+            })
 
     wall = time.time() - t0
 
@@ -148,9 +263,11 @@ def run_cell(cell: Cell, backend) -> int:
         "replicas_skipped_existing": n_skip,
         "replicas_fail": n_fail,
         "duration_s_per_replica": cell.duration_s,
+        "completion_tolerance_frac": COMPLETION_TOLERANCE_FRAC,
         "wall_s_total": round(wall, 2),
         "gpio_source": cell.gpio_source,
         "backend": type(backend).__name__,
+        "replicas": replica_records,  # Bug #3 fix: per-replica details
     }
     (cell.cell_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"\n  manifest: {cell.cell_dir}/manifest.json")

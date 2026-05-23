@@ -64,8 +64,25 @@ def interpolate_to_fixed_rate(
         else 0.
 
     Raises:
-        ValueError: if ``sample_period_us <= 0``, ``end_time_us < 0``,
-            events are out of order, or any event has invalid gpio_byte.
+        ValueError (raised eagerly at call time, Bug #2 fix):
+            ``sample_period_us <= 0``, ``end_time_us < 0``, or
+            ``initial_gpio_byte`` out of [0, 255].
+
+        ValueError (raised lazily during iteration): events out of
+            order or with invalid ``gpio_byte``. The order and range
+            of every event in the iterable is validated, including
+            those past ``end_time_us`` that are not emitted as
+            samples (Bug #4 fix: the iterable is fully drained at
+            the end of the generator, so even non-emitted events
+            cannot smuggle in bad data).
+
+    Bug #2 fix
+    ----------
+    Validation of the static parameters now runs eagerly at call time.
+    The generator body has been moved to ``_interpolate_impl``; this
+    wrapper performs pre-flight checks and *returns* the inner
+    generator. Previously, a bad ``end_time_us`` would only raise when
+    the caller started iterating, far from the original call site.
     """
     if sample_period_us <= 0:
         raise ValueError(
@@ -79,7 +96,18 @@ def interpolate_to_fixed_rate(
         raise ValueError(
             f"initial_gpio_byte out of range [0, 255]: {initial_gpio_byte}"
         )
+    return _interpolate_impl(
+        events, end_time_us, sample_period_us, initial_gpio_byte
+    )
 
+
+def _interpolate_impl(
+    events: Iterable[GPIOEvent],
+    end_time_us: int,
+    sample_period_us: int,
+    initial_gpio_byte: int,
+) -> Iterator[Sample]:
+    """Inner generator. Static-parameter validation must already have run."""
     current_byte = initial_gpio_byte
     sample_ts = 0
     last_event_ts = -1
@@ -107,3 +135,26 @@ def interpolate_to_fixed_rate(
 
         yield (sample_ts, current_byte)
         sample_ts += sample_period_us
+
+    # Bug #4 fix: drain remaining events past end_time_us so order and
+    # range validation runs on the WHOLE iterable, not just the prefix
+    # that produced samples. Without this, an out-of-order or
+    # malformed event after end_time_us would be silently ignored,
+    # and the validation contract in the docstring would be a lie.
+    # Note: this runs only when the generator is fully consumed by
+    # the caller; partial consumption (e.g. itertools.islice) won't
+    # trigger it. That's a known trade-off of generator-based design.
+    while next_event is not None:
+        ev_ts, ev_byte = next_event
+        if ev_ts < last_event_ts:
+            raise ValueError(
+                f"events out of order: {ev_ts} < {last_event_ts} "
+                f"(past end_time_us={end_time_us})"
+            )
+        if not 0 <= ev_byte <= 0xFF:
+            raise ValueError(
+                f"event gpio_byte out of range [0, 255]: {ev_byte} "
+                f"(past end_time_us={end_time_us})"
+            )
+        last_event_ts = ev_ts
+        next_event = next(events_iter, None)

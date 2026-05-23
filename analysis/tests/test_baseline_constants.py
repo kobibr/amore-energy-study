@@ -83,12 +83,23 @@ def test_one_time_setup_costs():
 def test_amore_vs_direct_ratio_documented():
     """Per-round AmorE BLS12_381 vs 3× direct pairing.
 
+    Bug #6 fix (silent-bias review 2026-05-23): the previous version
+    of this test asserted ``0.55 <= ratio <= 0.60``, locking the
+    non-like-for-like ratio (AmorE post-O3 vs RELIC pre-O3) inside
+    a tolerance band wide enough that any reader skimming the test
+    might extract ``0.572×`` as a real measurement and cite it. This
+    is exactly the silent-bias risk the original docstring warned
+    against. The new assertion uses ``pytest.approx`` with a tight
+    band AND an in-line failure message that begins with "DO NOT
+    CITE" — anyone who triggers this assertion failure sees the
+    warning before they see the number.
+
     As of 2026-05-12:
         AmorE (post-O3):    897.98 ms / round (488.28 + 409.70)
         3× direct (pre-O3): 3 × 523.4 = 1570.2 ms total
         Ratio:              897.98 / 1570.2 ≈ 0.572×
 
-    WARNING: This is NOT a like-for-like comparison.
+    The ratio above is NOT a like-for-like comparison.
     AmorE benefits from GCC -O3 inner-loop unrolling in fp_mul
     (see Section 8 of doc/AmorE_BLS12_381_Results.txt). The
     RELIC baseline (523.4 ms) was measured pre-O3 in the
@@ -113,7 +124,7 @@ def test_amore_vs_direct_ratio_documented():
     bn = CURVES["BN254"]
     bls = CURVES["BLS12_381"]
 
-    # BN254: like-for-like (both pre-O3).
+    # BN254: like-for-like (both pre-O3). This one IS quotable.
     bn_ratio = (bn["blind_per_round_ms"] + bn["verify_per_round_ms"]) / bn["direct_pairing_ms"]
     assert bn_ratio == pytest.approx(1.51, abs=0.01)
 
@@ -125,5 +136,22 @@ def test_amore_vs_direct_ratio_documented():
     three_direct = 3 * bls["direct_pairing_ms"]
     assert three_direct == pytest.approx(1570.2, abs=0.1)
 
+    # Bug #6 fix: named constant + point assertion + scary message.
+    # The named constant makes it clear that anyone extracting this
+    # value is extracting "the pre-O3 vs post-O3 mismatch ratio",
+    # not "the AmorE-vs-Direct ratio". The point assertion (instead
+    # of a range) means a regression doesn't silently land in the
+    # band; it has to match the exact known-stale figure.
+    BLS_RATIO_PRE_O3_VS_POST_O3 = 0.572  # NOT a real measurement
     ratio = amore_amort / three_direct
-    assert 0.55 <= ratio <= 0.60   # ~5% tolerance for variance / minor drift
+    assert ratio == pytest.approx(BLS_RATIO_PRE_O3_VS_POST_O3, abs=0.005), (
+        "*** DO NOT CITE THIS RATIO ***\n"
+        f"This is the AmorE post-O3 / 3×direct pre-O3 ratio ({ratio:.4f}). "
+        "It does NOT measure AmorE's true relative cost — RELIC was not "
+        "rebuilt with -O3 for like-for-like. See "
+        "test_amore_vs_direct_ratio_documented docstring and "
+        "docs/future_work.md 'RELIC re-measurement at -O3'. "
+        "Until that re-measurement lands, the only quotable BLS "
+        "ratio is the one estimated post-O3-on-both-sides "
+        "(~1.20× slower), NOT the mechanically-correct 0.572×."
+    )

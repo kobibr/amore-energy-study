@@ -225,6 +225,10 @@ class MockBackend:
 
         sample_count_drained = 0
         err = ""
+        # Bug #7 fix: track whether the client ever connected so we
+        # don't wait 10s for the server's one-shot exit when nobody
+        # actually opened the session.
+        connected = False
         try:
             MockPPK2 = self._get_client_class()
             client = MockPPK2(
@@ -232,43 +236,104 @@ class MockBackend:
                 connect_retries=10, retry_delay_s=0.3,
             )
             client.connect()
+            connected = True
+            # Bug #1 fix (2026-05-23): wrap the post-connect block in
+            # try/finally so client.disconnect() runs on every exit
+            # path, including exceptions thrown mid-measurement. The
+            # previous layout only disconnected in the success branch,
+            # which kept sockets open until GC and made the server's
+            # one-shot wait time out (10s SIGTERM + 3s SIGKILL per
+            # failed replica).
             try:
-                client.set_source_voltage(3300)
-            except Exception:
-                pass  # not all server versions implement it
-            try:
-                client.set_stop_mode(False)
-            except Exception:
-                pass
-            client.start_measuring()
+                try:
+                    client.set_source_voltage(3300)
+                except Exception:
+                    pass  # not all server versions implement it
+                try:
+                    client.set_stop_mode(False)
+                except Exception:
+                    pass
+                client.start_measuring()
 
-            # Background drainer: keeps the socket buffer from filling
-            stop_drain = [False]
-            drained = [0]
-            def _drain():
-                while not stop_drain[0]:
-                    s = client.get_samples()
-                    if s:
-                        drained[0] += len(s)
+                # Background drainer: keeps the socket buffer from filling.
+                # Bug #8 fix: capture any exception so a silent thread death
+                # (socket dropped, server crash, etc.) surfaces to the
+                # caller instead of producing an "ok" result with a partial
+                # sample count and no error message.
+                stop_drain = [False]
+                drained = [0]
+                drain_error: list[Exception | None] = [None]
+                def _drain():
+                    try:
+                        while not stop_drain[0]:
+                            s = client.get_samples()
+                            if s:
+                                drained[0] += len(s)
+                            time.sleep(0.1)
+                    except Exception as e:
+                        drain_error[0] = e
+                t = threading.Thread(target=_drain, daemon=True)
+                t.start()
+
+                # Bug #6 fix (2026-05-23): poll for early failure
+                # instead of sleeping blindly for the whole window.
+                # The previous time.sleep(duration_s + 0.5) ate the
+                # full duration even when server_proc died after one
+                # second; in batch runs this multiplied wasted time
+                # by the number of failing replicas.
+                t_deadline = time.time() + duration_s + 0.5
+                while time.time() < t_deadline:
+                    if drain_error[0] is not None:
+                        break
+                    if server_proc.poll() is not None:
+                        break
                     time.sleep(0.1)
-            t = threading.Thread(target=_drain, daemon=True)
-            t.start()
 
-            time.sleep(duration_s + 0.5)
-
-            stop_drain[0] = True
-            t.join(timeout=1.0)
-
-            client.stop_measuring()
-            drained[0] += len(client.get_samples())
-            client.disconnect()
-            sample_count_drained = drained[0]
+                stop_drain[0] = True
+                # Bug #2 fix (2026-05-23): the previous join(timeout=1.0)
+                # could time out with the drain thread still inside a
+                # blocking get_samples() call. The main thread would
+                # then call stop_measuring() + get_samples() on the
+                # SAME client concurrently with the still-alive drain
+                # thread, producing silent socket/frame corruption.
+                # Now: longer join timeout, and if the drain thread is
+                # still alive we leave the client alone — fail loudly
+                # instead of double-touching the socket.
+                t.join(timeout=2.0)
+                if t.is_alive():
+                    # Bug #5 fix: surface the drain hang explicitly
+                    # rather than continuing into a race that would
+                    # only show as "client error: ..." (or worse,
+                    # produce a CSV that looks fine but has corrupted
+                    # samples).
+                    err = (err or
+                           "drain thread hung (still alive after 2s join); "
+                           "not touching client further to avoid socket race")
+                else:
+                    client.stop_measuring()
+                    drained[0] += len(client.get_samples())
+                    sample_count_drained = drained[0]
+                    # Bug #8: propagate drain error if any
+                    if drain_error[0] is not None:
+                        err = f"drain thread died: {drain_error[0]}"
+            finally:
+                # Bug #1 fix: disconnect runs no matter how the inner
+                # block exits. Swallow disconnect errors — they are
+                # secondary to whatever caused us to land here.
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
         except Exception as e:
             err = f"client error: {e}"
 
-        # Wait for one-shot server to exit cleanly
+        # Wait for one-shot server to exit cleanly.
+        # Bug #7 fix: if nobody connected, the server is still waiting
+        # for accept() — there's nothing to wait for. Go straight to
+        # SIGTERM with a short timeout instead of paying the full 10s.
+        wait_timeout = 10 if connected else 2
         try:
-            server_proc.wait(timeout=10)
+            server_proc.wait(timeout=wait_timeout)
         except subprocess.TimeoutExpired:
             server_proc.send_signal(signal.SIGTERM)
             try:
@@ -374,6 +439,7 @@ class PPK2Backend:
 
         ppk2 = None
         csv_fp = None
+        log_fp = None  # Bug #6: declared up-front so finally can close it
         sample_count = 0
         t_start = time.time()
         err = ""
@@ -407,8 +473,28 @@ class PPK2Backend:
             # 5. Start measuring
             ppk2.start_measuring()
             log_fp.write(f"[{time.time():.3f}] Measuring started\n")
-            cumulative_us = 0
+            # Bug #7 fix: anchor sample timestamps to wall clock per
+            # batch so dropped/missing samples cannot make CSV time
+            # drift relative to real time. Within a batch we still
+            # space samples by SAMPLE_PERIOD_US (PPK2's internal rate),
+            # but each batch's *first* sample's time is taken from
+            # time.monotonic() - t_measure_start. This keeps GPIO-event
+            # alignment correct even if PPK2 occasionally delivers a
+            # short batch.
+            #
+            # Bug #3 fix (2026-05-23): the wall-clock anchor on its own
+            # does NOT guarantee CSV-row monotonicity across batches.
+            # Example: batch A arrives at t=100ms with 50 samples →
+            # anchored at [50..99]ms; batch B arrives at t=110ms with
+            # 50 samples → anchored at [60..109]ms. Sample 0 of B
+            # (60ms) precedes the last sample of A (99ms), producing a
+            # non-monotonic CSV that parse_traces.py will now reject
+            # outright (and that previously caused silently-negative
+            # dt in energy integration). We track `last_written_us` and
+            # clamp each new batch's t0 to at least one period past it.
+            t_measure_start = time.monotonic()
             t_end = time.time() + duration_s
+            last_written_us = -self.SAMPLE_PERIOD_US
 
             # 6. Drain loop
             while time.time() < t_end:
@@ -420,19 +506,45 @@ class PPK2Backend:
                 if not samples_uA:
                     continue
 
+                # Wall-clock anchor for this batch's first sample.
+                batch_t0_us = int(
+                    (time.monotonic() - t_measure_start) * 1_000_000
+                )
+                # Subtract len(samples_uA)*SAMPLE_PERIOD_US so the
+                # FIRST sample of the batch sits at the *arrival* time
+                # minus the batch's logical duration — i.e. the batch
+                # is anchored at its true start, not at the moment
+                # get_data() returned.
+                batch_duration_us = len(samples_uA) * self.SAMPLE_PERIOD_US
+                batch_t0_us = max(0, batch_t0_us - batch_duration_us)
+                # Bug #3 fix: enforce monotonicity. If the wall-clock
+                # anchor would put this batch earlier than (or equal
+                # to) the last sample we already wrote, push it forward
+                # by exactly one sample period. The resulting CSV is
+                # then guaranteed strictly monotonic in timestamp_us.
+                # If the PPK2 dropped a long gap, the clamp is a no-op
+                # and the gap shows up naturally in measured_us vs
+                # duration_us downstream (see parse_traces gap_us).
+                batch_t0_us = max(
+                    batch_t0_us, last_written_us + self.SAMPLE_PERIOD_US
+                )
+
                 for i, current_uA in enumerate(samples_uA):
                     if i < len(digital_raw):
                         gpio_byte = digital_raw[i] & 0x07  # D0-D2 only
                     else:
                         gpio_byte = 0
                     writer.writerow([
-                        cumulative_us + i * self.SAMPLE_PERIOD_US,
+                        batch_t0_us + i * self.SAMPLE_PERIOD_US,
                         f"{current_uA:.3f}",
                         f"{voltage_V:.3f}",
                         gpio_byte,
                     ])
                     sample_count += 1
-                cumulative_us += len(samples_uA) * self.SAMPLE_PERIOD_US
+                # Update the high-water mark — the last row we just wrote.
+                last_written_us = (
+                    batch_t0_us + (len(samples_uA) - 1) * self.SAMPLE_PERIOD_US
+                )
 
             # Flush CSV before stop
             csv_fp.flush()
@@ -442,7 +554,7 @@ class PPK2Backend:
             ppk2.stop_measuring()
             ppk2.toggle_DUT_power("OFF")
             log_fp.write(f"[{time.time():.3f}] Stopped, DUT off\n")
-            log_fp.close()
+            # log_fp closed in finally — Bug #6 fix
 
         except Exception as e:
             err = f"PPK2Backend error: {type(e).__name__}: {e}"
@@ -452,7 +564,28 @@ class PPK2Backend:
                     csv_fp.close()
                 except Exception:
                     pass
+            if log_fp:
+                # Bug #6 fix: guarantee log_fp closes even if an
+                # exception fired anywhere between its open and the
+                # in-try close. Previously a mid-try exception would
+                # leak the file handle to GC.
+                try:
+                    log_fp.close()
+                except Exception:
+                    pass
             if ppk2:
+                # Bug #4 fix (2026-05-23): if an exception fired between
+                # start_measuring() and the explicit stop_measuring()
+                # above, the PPK2 stayed in measuring state. The next
+                # replica connecting to the same device could then
+                # receive stale samples from the firmware buffer of
+                # the previous (failed) measurement — a silent bias
+                # source. Call stop_measuring() here defensively; it's
+                # idempotent on a device already stopped.
+                try:
+                    ppk2.stop_measuring()
+                except Exception:
+                    pass
                 try:
                     ppk2.toggle_DUT_power("OFF")
                 except Exception:
