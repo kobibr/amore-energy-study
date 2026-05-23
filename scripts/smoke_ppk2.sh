@@ -132,16 +132,45 @@ try:
     delta = mean_on - mean_off
 
     # E.5: DUT-detection gate (the bipolar check)
-    # Active STM32 draws 50-90 mA → delta should be at least 5 mA.
-    # Below 1 mA delta → VOUT load is missing or firmware not booted.
+    # STM32 active draws 50-90 mA; delta must be in [5, 200] mA.
+    # Below 1 mA → VOUT load missing / firmware not booted.
+    # Above 200 mA → not a real DUT load; usually uncalibrated PPK2
+    # source-mode emitting garbage on a floating VOUT (we have seen
+    # 8 A "readings" with nothing connected). Also require stability:
+    # a real STM32 has CV < 50%; PPK2 garbage has CV > 100%.
     DELTA_MIN_UA = 1000.0
-    if delta > DELTA_MIN_UA:
-        step("E.5", True,
-             f"DUT detected: delta={delta:.1f} µA (off={mean_off:.1f}, on={mean_on:.1f})")
+    DELTA_MAX_UA = 200_000.0  # STM32 can't draw more than 200 mA
+
+    # Re-measure with full sample set for stdev computation
+    ppk2.start_measuring(); time.sleep(1.0)
+    _raw = ppk2.get_data(); ppk2.stop_measuring()
+    if _raw and len(_raw) >= 100:
+        _on_samples, _ = ppk2.get_samples(_raw)
+        on_stdev = statistics.stdev(_on_samples) if len(_on_samples) > 1 else 0.0
+        on_cv = abs(on_stdev / mean_on) if mean_on != 0 else float("inf")
     else:
+        on_stdev = 0.0; on_cv = float("inf")
+
+    CV_MAX = 0.5  # STM32 active phase: CV typically <10%; garbage: >100%
+
+    if delta < DELTA_MIN_UA:
         step("E.5", False,
              f"DUT NOT detected: delta={delta:.1f} µA < {DELTA_MIN_UA} µA. "
              f"Check VOUT->STM32 3V3 wire, IDD jumper removed, firmware flashed.")
+    elif delta > DELTA_MAX_UA:
+        step("E.5", False,
+             f"delta={delta:.1f} µA exceeds STM32 maximum ({DELTA_MAX_UA:.0f} µA). "
+             f"Not a real DUT — likely uncalibrated PPK2 emitting noise on "
+             f"floating VOUT. Connect STM32 properly.")
+    elif on_cv > CV_MAX:
+        step("E.5", False,
+             f"DUT-on too unstable: CV={on_cv*100:.1f}% > {CV_MAX*100:.0f}%. "
+             f"mean={mean_on:.1f} µA, stdev={on_stdev:.1f} µA. "
+             f"Likely no real load on VOUT (noise dominates).")
+    else:
+        step("E.5", True,
+             f"DUT detected: delta={delta:.1f} µA, on-CV={on_cv*100:.1f}% "
+             f"(off={mean_off:.1f}, on={mean_on:.1f})")
 
     # E.6: Absolute range — ONLY when calibrated. Uncalibrated PPK2 readings
     # are scaled by an unknown factor (see docs/known_caveats.md).

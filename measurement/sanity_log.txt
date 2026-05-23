@@ -11,3 +11,4 @@
 2026-05-23 09:55:47 | outer=b48453b | fw=7c9cee3 | smoke=PASS(2s) regr=PASS(100s)
 2026-05-23 17:21:38 | outer=933b19d | fw=6a75cea | smoke=PASS(2s) regr=PASS(97s)
 2026-05-23 17:26:27 | outer=082b0a6 | fw=6a75cea | smoke=PASS(2s) regr=PASS(95s)
+2026-05-23 17:45:50 | outer=d6a3eb4 | fw=6a75cea | smoke=PASS(5s) regr=PASS(96s)
