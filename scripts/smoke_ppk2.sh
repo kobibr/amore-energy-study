@@ -47,120 +47,127 @@ source .venv/bin/activate
 # All PPK2 work in ONE Python session to avoid USB reconnect issues
 python3 > "${LOG_DIR}/ppk2_full.log" 2>&1 << 'PYEOF'
 """
-Single-session PPK2 smoke test.
-Runs E.1-E.5 in one process, no disconnect/reconnect.
-Emits structured JSON-ish results at end for shell parsing.
+Single-session PPK2 smoke test (v3).
+
+Bipolar gate (off vs on) with calibration awareness:
+  - Calibrated PPK2: strict absolute thresholds + delta check.
+  - Uncalibrated PPK2: only delta check (absolute values meaningless).
+
+Emits PASS-WARN when uncalibrated; smoke_ppk2.sh treats PASS-WARN as
+non-fatal so sanity_check.sh proceeds. See docs/known_caveats.md.
 """
 import sys, time, statistics, json
-from pathlib import Path
-
 results = {}
-
 def step(name, ok, detail=""):
     results[name] = {"pass": ok, "detail": detail}
-    marker = "PASS" if ok else "FAIL"
-    print(f"[{marker}] {name}: {detail}")
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
-# === E.1: find PPK2 ===
+# E.1: find PPK2
 try:
     import serial.tools.list_ports
-    ppk2_port = None
-    for p in serial.tools.list_ports.comports():
-        desc = p.description or ""
-        if "PPK" in desc or "Nordic" in desc:
-            ppk2_port = p.device
-            break
-    if ppk2_port:
-        step("E.1", True, f"PPK2 at {ppk2_port}")
-    else:
+    ppk2_port = next(
+        (p.device for p in serial.tools.list_ports.comports()
+         if "PPK" in (p.description or "") or "Nordic" in (p.description or "")),
+        None,
+    )
+    if not ppk2_port:
         step("E.1", False, "No PPK2 device found")
-        print("__RESULTS_JSON__" + json.dumps(results))
-        sys.exit(1)
+        print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
+    step("E.1", True, f"PPK2 at {ppk2_port}")
 except Exception as e:
     step("E.1", False, f"{type(e).__name__}: {e}")
-    print("__RESULTS_JSON__" + json.dumps(results))
-    sys.exit(1)
+    print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
 
-# === E.2: connect ===
+# E.2: connect + get_modifiers + detect calibration state
 try:
     from ppk2_api.ppk2_api import PPK2_API
     ppk2 = PPK2_API(ppk2_port, timeout=2, write_timeout=2)
     ppk2.get_modifiers()
-    step("E.2", True, "Connected, modifiers read")
+    UNCALIBRATED = (
+        hasattr(ppk2, "modifiers")
+        and isinstance(ppk2.modifiers, dict)
+        and str(ppk2.modifiers.get("Calibrated", "0")) == "0"
+    )
+    cal_msg = "UNCALIBRATED (Calibrated=0)" if UNCALIBRATED else "calibrated"
+    step("E.2", True, f"Connected, {cal_msg}")
 except Exception as e:
     step("E.2", False, f"{type(e).__name__}: {e}")
-    print("__RESULTS_JSON__" + json.dumps(results))
-    sys.exit(1)
+    print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
 
-# === E.3: source mode, sample, read ===
+def measure_1s():
+    ppk2.start_measuring(); time.sleep(1.0)
+    raw = ppk2.get_data(); ppk2.stop_measuring()
+    if not raw or len(raw) < 100: return None, 0
+    s, _ = ppk2.get_samples(raw)
+    return (statistics.mean(s), len(s)) if s and len(s) >= 100 else (None, 0)
+
 try:
-    ppk2.set_source_voltage(3300)   # 3.3 V
+    ppk2.set_source_voltage(3300)
     ppk2.use_source_meter()
+    time.sleep(0.3)
+
+    # E.3: DUT-off
+    ppk2.toggle_DUT_power("OFF"); time.sleep(0.5)
+    # Drain stale buffer
+    ppk2.start_measuring(); time.sleep(0.3); ppk2.get_data(); ppk2.stop_measuring()
     time.sleep(0.2)
-
-    ppk2.toggle_DUT_power("ON")
-    time.sleep(0.5)   # let STM32 boot/settle
-
-    ppk2.start_measuring()
-    time.sleep(1.0)   # capture 1 second
-    raw = ppk2.get_data()
-    ppk2.stop_measuring()
-
-    if raw is None or len(raw) < 100:
-        step("E.3", False, f"insufficient raw ({0 if raw is None else len(raw)} bytes)")
+    mean_off, n_off = measure_1s()
+    if mean_off is None:
+        step("E.3", False, "no samples DUT-off")
         ppk2.toggle_DUT_power("OFF")
-        print("__RESULTS_JSON__" + json.dumps(results))
-        sys.exit(1)
+        print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
+    step("E.3", True, f"DUT-off: {n_off} samples, mean {mean_off:.2f} µA")
 
-    samples, _ = ppk2.get_samples(raw)
-    if not samples or len(samples) < 100:
-        step("E.3", False, f"insufficient samples ({len(samples) if samples else 0})")
-        ppk2.toggle_DUT_power("OFF")
-        print("__RESULTS_JSON__" + json.dumps(results))
-        sys.exit(1)
-
-    mean_uA = statistics.mean(samples)
-    stdev_uA = statistics.stdev(samples) if len(samples) > 1 else 0.0
-    n_samples = len(samples)
-
-    step("E.3", True, f"{n_samples} samples, mean {mean_uA:.1f} uA ({mean_uA/1000:.2f} mA)")
-
-    # === E.4: sane range ===
-    # 5 mA = 5,000 uA (lower) ; 200 mA = 200,000 uA (upper)
-    if 5_000 <= mean_uA <= 200_000:
-        step("E.4", True, f"{mean_uA:.0f} uA in sane range [5,000-200,000]")
-    elif mean_uA < 5_000:
-        step("E.4", False, f"{mean_uA:.0f} uA too LOW (<5 mA) - STM32 not powered? IDD jumper still in?")
-    else:
-        step("E.4", False, f"{mean_uA:.0f} uA too HIGH (>200 mA) - short risk!")
-
-    # === E.5: sample rate ===
-    # ppk2-api 0.9.2 uses AVERAGE mode, default ~1 ksps.
-    # AVG_NUM_SET is "no-firmware" so we can't change it via this library.
-    # Streaming mode (100 ksps) would require a library fork.
-    # For smoke test: just verify data flows (>500 samples per second).
-    # Mode C (UART per-byte energy) will need higher rate - handled separately.
-    if 500 <= n_samples <= 150_000:
-        step("E.5", True, f"{n_samples} samples in 1s (data flows; library uses Average mode @ ~1 ksps)")
-    elif n_samples < 500:
-        step("E.5", False, f"{n_samples} samples - too few, data not flowing properly")
-    else:
-        step("E.5", True, f"{n_samples} samples in 1s (unexpectedly high - good)")
-
-    # Cleanup
-    ppk2.toggle_DUT_power("OFF")
+    # E.4: DUT-on
+    ppk2.toggle_DUT_power("ON"); time.sleep(0.5)
+    ppk2.start_measuring(); time.sleep(0.3); ppk2.get_data(); ppk2.stop_measuring()
     time.sleep(0.2)
+    mean_on, n_on = measure_1s()
+    if mean_on is None:
+        step("E.4", False, "no samples DUT-on")
+        ppk2.toggle_DUT_power("OFF")
+        print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
+    step("E.4", True, f"DUT-on: {n_on} samples, mean {mean_on:.2f} µA")
+
+    delta = mean_on - mean_off
+
+    # E.5: DUT-detection gate (the bipolar check)
+    # Active STM32 draws 50-90 mA → delta should be at least 5 mA.
+    # Below 1 mA delta → VOUT load is missing or firmware not booted.
+    DELTA_MIN_UA = 1000.0
+    if delta > DELTA_MIN_UA:
+        step("E.5", True,
+             f"DUT detected: delta={delta:.1f} µA (off={mean_off:.1f}, on={mean_on:.1f})")
+    else:
+        step("E.5", False,
+             f"DUT NOT detected: delta={delta:.1f} µA < {DELTA_MIN_UA} µA. "
+             f"Check VOUT->STM32 3V3 wire, IDD jumper removed, firmware flashed.")
+
+    # E.6: Absolute range — ONLY when calibrated. Uncalibrated PPK2 readings
+    # are scaled by an unknown factor (see docs/known_caveats.md).
+    if UNCALIBRATED:
+        step("E.6", True,
+             f"absolute range check SKIPPED — PPK2 uncalibrated, "
+             f"raw mean_on={mean_on:.0f} µA not trustable")
+    else:
+        if 5_000 <= mean_on <= 200_000:
+            step("E.6", True, f"DUT-on {mean_on:.0f} µA in STM32 range [5k-200k]")
+        elif mean_on < 5_000:
+            step("E.6", False, f"DUT-on {mean_on:.0f} µA below STM32 active range")
+        else:
+            step("E.6", False, f"DUT-on {mean_on:.0f} µA above STM32 range — short risk")
+
+    ppk2.toggle_DUT_power("OFF"); time.sleep(0.2)
 
 except Exception as e:
     step("E.3", False, f"{type(e).__name__}: {e}")
     import traceback; traceback.print_exc()
-    try:
-        ppk2.toggle_DUT_power("OFF")
+    try: ppk2.toggle_DUT_power("OFF")
     except: pass
-    print("__RESULTS_JSON__" + json.dumps(results))
-    sys.exit(1)
+    print("__RESULTS_JSON__" + json.dumps(results)); sys.exit(1)
 
 print("__RESULTS_JSON__" + json.dumps(results))
+
 PYEOF
 
 PY_EXIT=$?

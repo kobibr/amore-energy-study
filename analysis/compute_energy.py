@@ -283,6 +283,9 @@ def _warn_on_ambiguous_gpio_byte(out: TraceEnergy) -> None:
                 f"is a mathematical average across heterogeneous "
                 f"physics — likely Stop+Idle aliased under gpio_byte=0. "
                 f"Use per_phase data or a current-range classifier "
-                f"instead of by_gpio_byte for this key.",
+                f"instead of by_gpio_byte for this key. "
+                f"NOTE: on an uncalibrated PPK2 (modifiers['Calibrated']==0) "
+                f"ratios across different current ranges are NOT preserved — "
+                f"each range has its own offset/gain. See docs/known_caveats.md.",
                 file=sys.stderr,
             )

@@ -170,6 +170,28 @@ def main(argv: list[str] | None = None) -> int:
     # Open + calibrate PPK2
     ppk2 = PPK2_API(port, timeout=2, write_timeout=2)
     ppk2.get_modifiers()
+
+    # 2026-05-23: detect uncalibrated PPK2 (modifiers['Calibrated']=='0').
+    # Library defaults stand in for EEPROM constants; deviation-from-
+    # Ohms-law becomes meaningless (33Ω resistor will read ~156 mA
+    # instead of 100 mA). We continue for ratio-mode operation but
+    # force PASS-WARN regardless of absolute deviation.
+    # See docs/known_caveats.md.
+    UNCALIBRATED = (
+        hasattr(ppk2, "modifiers")
+        and isinstance(ppk2.modifiers, dict)
+        and str(ppk2.modifiers.get("Calibrated", "0")) == "0"
+    )
+    if UNCALIBRATED:
+        print()
+        print("*" * 60)
+        print("  WARNING: PPK2 IS NOT CALIBRATED")
+        print("  modifiers['Calibrated'] == '0'. Absolute readings are")
+        print("  NOT trustable; only same-range ratios are safe.")
+        print("  See docs/known_caveats.md.")
+        print("*" * 60)
+        print()
+
     ppk2.set_source_voltage(args.voltage_mv)
     ppk2.use_source_meter()
     ppk2.toggle_DUT_power("ON")
@@ -262,7 +284,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Verdict (silent-bias review: three bands instead of pass/fail).
     abs_dev = abs(deviation_pct)
-    if abs_dev <= args.tolerance_pct:
+    if UNCALIBRATED:
+        # Uncalibrated PPK2 — deviation value is not a meaningful
+        # test of instrument accuracy. PASS-WARN lets ratio-mode
+        # workflows proceed while flagging the caveat.
+        verdict = "PASS-WARN"
+    elif abs_dev <= args.tolerance_pct:
         verdict = "PASS"
         if abs_dev > TIGHT_TOLERANCE_PCT and args.tolerance_pct > TIGHT_TOLERANCE_PCT:
             # User loosened tolerance AND we're outside the tight band.

@@ -285,3 +285,34 @@ Suspect causes for STM32 silence (unchanged from original R1):
 - UART buffer overrun on STM32 side
 - Memory issue on RPi server (py_ecc allocation growth?)
 
+
+## PPK2 Not Calibrated (2026-05-23)
+
+### Status
+`modifiers['Calibrated'] == '0'` — factory calibration was not loaded
+into PPK2 EEPROM (calibration kit unavailable on this bench).
+
+### Effect
+- Absolute current readings are NOT trustable. With nothing connected,
+  PPK2 reports ~55 mA instead of 0.
+- Each ADC range has its own offset (modifiers['O'] = {73..161 µA}),
+  so the bias is **piecewise-linear across ranges**, not globally
+  linear.
+
+### What IS safe to report
+- **Ratios within the same current range** (e.g. AmorE-active vs
+  Direct-active, both ~50–90 mA). Linear bias cancels.
+- **Relative comparisons within one session.**
+
+### What is NOT safe to report
+- Absolute energy figures (µJ, mJ) — DO NOT cite.
+- Comparisons spanning ranges (Stop @ 0.5 µA vs Active @ 85 mA).
+- Any sub-1% claim.
+
+### Required paper disclosure
+"PPK2 used in factory-default (uncalibrated) state; reported values are
+relative ratios within the active-phase current range."
+
+### Resolution path
+Nordic PPK2 calibration kit + nRF Connect Power Profiler calibration
+utility → re-validate via `analysis/calibrate.py` with 33 Ω reference.
