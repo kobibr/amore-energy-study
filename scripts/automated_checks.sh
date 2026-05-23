@@ -150,7 +150,7 @@ check_A6() {
     JSON=firmware/amore-fw/scripts/expected_binaries.json
     if [ -f "$ELF" ] && [ -f "$JSON" ]; then
         ACTUAL_SHA=$(sha256sum "$ELF" | cut -d' ' -f1)
-        EXPECTED_SHA=$(python3 -c "import json; print(json.load(open('$JSON')).get('bls12_381',{}).get('sha256',''))" 2>/dev/null)
+        EXPECTED_SHA=$(python3 -c "import json; d=json.load(open('$JSON')); print(d.get('BLS12_381',{}).get('elf',{}).get('sha256',''))" 2>/dev/null)
         if [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ]; then
             report "A6" "ELF SHA256 matches expected" PASS "${ACTUAL_SHA:0:16}..."
         else
