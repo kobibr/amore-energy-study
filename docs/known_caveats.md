@@ -235,3 +235,34 @@ investigation.
   supported by this trial. Paper must acknowledge that we
   observed 1 FP in 10 honest rounds (single trial; needs more
   data to bound the rate)
+
+## TRIAGE STATUS (2026-05-23)
+
+After investigating error codes and submodule sync, we now have:
+
+**Decoded:**
+- status=0xdead0051 = 0xDEAD0050 | bi where bi=1 (N=10 batch)
+  → "verify_fail caused early return from honest-batch loop"
+  → This is the SAME event as R2, just expressed as final status.
+
+**Confirmed consequences (not independent bugs):**
+- magic=0x00000000 → STM32 returned at line 392 before reaching
+  PHASE_DONE. Direct consequence of R2.
+- amort/round=0 for N=10 → firmware skipped the computation
+  because the batch aborted on verify_fail. Indirect consequence.
+- All N=50 telemetry zero → batch never executed because of
+  abort. Indirect consequence of R2.
+
+**Bug count after triage:**
+- INDEPENDENT bugs: R1, R2, C1, C2, C3, D1, D3 = 7
+- CONSEQUENCES of above: #4 magic, #3 amort, #5 status = 3
+- DESIGN/DOCUMENTATION: D2, F1, F2, S1, S2, S3, K3, R3 = 8
+
+**Investigation focus narrowed to:**
+- R1: STM32 silent after ~12 rounds (root cause unknown)
+- R2: AmorE_Verify() returns false on honest rounds (root cause unknown)
+- C1/C2: PPK2 calibration (no resistor, script may also be buggy)
+- D1/D3: Synthetic data vs real captures
+- #8: No PPK2 trace capture during sweep (process gap)
+
+**Triage complete. Ready for code review.**
