@@ -75,12 +75,15 @@ def parse_trace(csv_path: Path) -> List[Phase]:
         return []
 
     # Determine sample period from the first two rows (uniform assumed).
-    if len(rows) >= 2:
-        sample_period_us = rows[1][0] - rows[0][0]
-    else:
-        sample_period_us = 40  # 25 kHz default (mock)
+    # A single-row CSV cannot define a sample period; treat as empty
+    # rather than guess a default that may be wrong by orders of magnitude.
+    if len(rows) < 2:
+        return []
+    sample_period_us = rows[1][0] - rows[0][0]
     if sample_period_us <= 0:
-        sample_period_us = 40
+        # Same defensive case: non-positive period means malformed
+        # CSV (out-of-order timestamps). Return empty rather than guess.
+        return []
 
     phases: List[Phase] = []
     # Accumulator for the current Phase
