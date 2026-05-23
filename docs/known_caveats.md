@@ -167,3 +167,71 @@ usable. Reproducing N=10/N=50 amort/round numbers requires only
 12+ rounds successfully completed at each N, so this caveat does
 NOT block the audit_table.
 
+
+### R2. Sporadic verify_fail in N=10 batch (1/10 rate, round 9)
+
+**Observed:** 2026-05-22 22:15 sweep (HONEST_ROUNDS=10).
+The N=10 batch reported `verify_ok=9 verify_fail=1` with the failure
+in round 9. The protocol-level check (server saw "accepted by client")
+PASSed for the round, so 10/10 honest rounds were credited at the
+server, but the STM32 firmware's internal verify check (re-computing
+the proof on the client side) reported a mismatch.
+
+**Ring-log evidence:**
+
+### R2. Sporadic verify_fail in N=10 batch (1/10 rate)
+
+**Observed:** 2026-05-22 22:15 sweep — the N=10 batch reported
+verify_ok=9 verify_fail=1 with the failure in round 9. The
+server-side acceptance was clean (10/10 accepted), so the
+protocol-level handshake passed. But STM32's internal verify
+check (the client-side recomputation of the proof) disagreed
+with the server's response in exactly one round.
+
+**Key observation: NOT a timing issue.**
+Round 9's server compute time was 87,329 ms — squarely in the
+normal range (87,076 to 88,045 ms across the other 9 honest
+rounds). Round 11 (the malicious round) took 89,687 ms,
+noticeably longer, and was correctly rejected.
+
+**Ring-log:**
+```
+phase=0x13 batch=1 round=9 cycles=2668728286 extra=0x00000000  ← verify start
+phase=0x13 batch=1 round=9 cycles=2739028506 extra=0x00000010  ← FAIL
+phase=0x14 batch=1 round=9 cycles=2739028524 extra=0x00000000  ← status
+```
+Verify took 418 ms (cycles delta 70,300,220 @ 168MHz) which is
+normal verify-time range (N=1 batch verify was 412 ms).
+
+**Counter in firmware (src/amore.c:378):**
+```c
+res->rounds_verify_fail[bi]++;
+```
+This counter is incremented when the client-side verify check
+returns false. The implementation of that check is what needs
+investigation.
+
+**Suspect causes (untested):**
+- BLS12-381 arithmetic edge case: an intermediate value lands
+  on a special point (e.g.\ identity in G_T) where the equality
+  comparison is computed differently
+- py_ecc server-side returned a value that is **mathematically
+  valid** but differs from what AmorE's verification expects
+  by a sign / cofactor / canonical-form convention
+- Random blinding factor used in verify generates a non-trivial
+  algebraic cancellation that the verify did not anticipate
+- A bit-flip somewhere outside UART (CRC=0 rules out transit)
+
+**Action items:**
+1. Re-run HONEST_ROUNDS=10 two more times — if 0-1 fail per 10,
+   it's a real ~10% FP rate; if 0 across 30, single-trial fluke
+2. Instrument firmware to log expected vs.\ actual on verify_fail
+3. Compare py_ecc canonical-form choices with our verify
+
+**Impact on paper claims:**
+- ✓ "Verify catches malicious rounds" — still supported (round
+  11 was correctly REJECTED)
+- ⚠ "Verify has zero false positives on honest rounds" — NOT
+  supported by this trial. Paper must acknowledge that we
+  observed 1 FP in 10 honest rounds (single trial; needs more
+  data to bound the rate)
