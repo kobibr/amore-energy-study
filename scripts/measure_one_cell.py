@@ -55,8 +55,8 @@ from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────────────────
 DEFAULT_VOLTAGE_MV = 3300
-BOOT_SETTLE_S = 0.5       # after toggle_DUT_power(ON)
-POST_FLASH_SETTLE_S = 1.0  # after flash, before sampling
+BOOT_SETTLE_S = 10.0      # beton-barzel: after toggle_DUT_power(ON), wait for PPK2 internal D-channel re-init
+POST_FLASH_SETTLE_S = 10.0  # beton-barzel: after flash, PPK2 needs full re-stabilization
 SERVER_STARTUP_S = 2.0    # let RPi server bind UART
 DRAIN_INTERVAL_S = 0.05   # 50 ms — PPK2 buffer drain cadence
 # PPK2 sample period is determined empirically per-run. The ppk2_api
@@ -143,6 +143,73 @@ def wait_for_ppk2_absent(timeout_s: float = 10.0) -> None:
     log(f"[ppk2-wait] still present after {timeout_s}s (this is OK if DUT power only)")
 
 
+def probe_ppk2_digital(ppk2, label: str, duration_s: float = 1.0) -> dict:
+    """Briefly sample PPK2 digital channels and log diversity.
+    
+    Returns dict of {value: count}. Logs summary line.
+    Used at every state transition to localize where D-channels break.
+    """
+    import collections
+    try:
+        ppk2.start_measuring()
+        time.sleep(0.3)
+        seen = collections.Counter()
+        t0 = time.time()
+        while time.time() - t0 < duration_s:
+            raw = ppk2.get_data()
+            if raw:
+                res = ppk2.get_samples(raw)
+                if isinstance(res, tuple) and len(res) > 1:
+                    seen.update(res[1])
+            time.sleep(0.05)
+        ppk2.stop_measuring()
+        total = sum(seen.values()) or 1
+        summary = ", ".join(f"{v}={c}({c/total*100:.0f}%)" for v, c in sorted(seen.items()))
+        log(f"[ppk2-probe:{label}] D-channel={{{summary}}} total={total}")
+        return dict(seen)
+    except Exception as e:
+        log(f"[ppk2-probe:{label}] EXCEPTION: {e}")
+        return {}
+
+
+def capture_dmesg(label: str, log_dir):
+    """Capture last 30 dmesg lines related to USB/ACM for forensics."""
+    import subprocess
+    try:
+        r = subprocess.run(["sudo", "-n", "dmesg", "--since", "30s ago"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            usb_lines = [l for l in r.stdout.split("\n") if any(k in l.lower() for k in ("usb", "acm", "tty"))]
+            if usb_lines:
+                snapshot = (log_dir / f"dmesg_{label}.log")
+                snapshot.write_text("\n".join(usb_lines[-30:]))
+                log(f"[dmesg:{label}] {len(usb_lines)} USB/ACM lines → {snapshot.name}")
+    except Exception as e:
+        log(f"[dmesg:{label}] could not capture: {e}")
+
+
+def probe_stm32_odr() -> int | None:
+    """Read STM32 GPIOA->ODR via SWD without halting CPU for too long.
+    Returns the 32-bit ODR value, or None on failure."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "pi@raspberrypi.local",
+             "sudo openocd -f /home/pi/rpi_swd.cfg "
+             "-c 'init' -c 'halt' -c 'mdw 0x40020014 1' -c 'resume' -c 'exit'"],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = r.stdout + r.stderr
+        for line in out.split("\n"):
+            if "0x40020014:" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1], 16)
+    except Exception as e:
+        log(f"[probe-odr] failed: {e}")
+    return None
+
+
 def stop_modem_manager() -> None:
     """Stop ModemManager (background service that grabs CDC-ACM devices).
     Without this, PPK2 randomly becomes unavailable mid-run.
@@ -204,7 +271,7 @@ def hard_power_cycle_dut(ppk2, voltage_mv: int):
         ppk2.toggle_DUT_power("OFF")
     except Exception as e:
         log(f"[dut]   toggle_DUT_power(OFF) raised: {e}")
-    time.sleep(3.0)  # generous: USB host needs time to notice
+    time.sleep(10.0)  # beton-barzel: USB host + PPK2 internal stabilization
     
     # 2. Close PPK2 serial
     log("[dut] hard power-cycle step 2/5: close PPK2 serial")
@@ -214,7 +281,7 @@ def hard_power_cycle_dut(ppk2, voltage_mv: int):
         pass
     del ppk2
     gc.collect()
-    time.sleep(3.0)  # generous: let USB subsystem settle
+    time.sleep(10.0)  # beton-barzel: USB subsystem full settle
     
     # 3. Verify PPK2 stable
     log("[dut] hard power-cycle step 3/5: verify PPK2 stable (5 consecutive)")
@@ -232,7 +299,7 @@ def hard_power_cycle_dut(ppk2, voltage_mv: int):
     # 5. DUT ON
     log("[dut] hard power-cycle step 5/5: DUT ON + boot wait")
     new_ppk2.toggle_DUT_power("ON")
-    time.sleep(3.0)  # firmware boots, Triggers_Init() runs, GPIO settles
+    time.sleep(10.0)  # beton-barzel: firmware boot + PPK2 D-channel re-init
     
     log("[dut] hard power-cycle complete")
     return new_ppk2
@@ -427,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Sampling cap (s). Default = curve+mode standard.")
     p.add_argument("--smoke", action="store_true",
                    help="Smoke mode: shorter duration, honest_rounds=1")
+    p.add_argument("--probe-odr", action="store_true",
+                   help="Probe STM32 ODR via SWD periodically (debug only)")
     args = p.parse_args(argv)
 
     if not args.elf.exists():
@@ -539,17 +608,25 @@ def main(argv: list[str] | None = None) -> int:
         ppk2.set_source_voltage(args.voltage_mv)
         ppk2.use_source_meter()
         log(f"[ppk2] source mode @ {args.voltage_mv}mV")
+        # T1: probe D-channels BEFORE turning DUT on
+        probe_ppk2_digital(ppk2, "T1-configured-pre-DUT-on", 1.0)
 
         # 3. Power on DUT
         ppk2.toggle_DUT_power("ON")
         log("[ppk2] DUT power ON (LED should be RED)")
         time.sleep(BOOT_SETTLE_S)
+        # T2: probe after first DUT ON (firmware not yet flashed, but old fw may run)
+        probe_ppk2_digital(ppk2, "T2-after-first-DUT-on", 1.0)
+        capture_dmesg("T2-after-first-DUT-on", args.out)
 
         # 4. Flash STM32 (PPK2 is supplying power, so flash will succeed)
         if not flash_via_rpi(args.elf, args.rpi_user, args.rpi_host):
             err_msg = "flash failed after retries"
             return 1
         time.sleep(POST_FLASH_SETTLE_S)
+        # T3: probe right after flash + post-flash settle
+        probe_ppk2_digital(ppk2, "T3-after-flash", 1.0)
+        capture_dmesg("T3-after-flash", args.out)
 
         # 4b. CRITICAL: hard power-cycle DUT after flash.
         # The openocd 'reset run' at the end of flash leaves PPK2's internal
@@ -559,6 +636,11 @@ def main(argv: list[str] | None = None) -> int:
         # Reproduced 2026-05-27 in Day 5; documented in DEBUG_NOTES.
         log("[ppk2] hard power-cycling DUT (post-flash digital reset)")
         ppk2 = hard_power_cycle_dut(ppk2, args.voltage_mv)
+        # T4: probe right after hard power cycle returns
+        probe_ppk2_digital(ppk2, "T4-after-hard-cycle", 1.0)
+        capture_dmesg("T4-after-hard-cycle", args.out)
+        odr_t4 = probe_stm32_odr()
+        log(f"[ppk2-probe:T4-odr] STM32 ODR = 0x{odr_t4:08x}" if odr_t4 is not None else "[ppk2-probe:T4-odr] read failed")
 
         # 5. (Mode A only) Start RPi server.py
         #    Curve-aware: BN254 uses server_bn254.py, BLS12_381 uses server.py
@@ -586,6 +668,9 @@ def main(argv: list[str] | None = None) -> int:
             if server_proc.poll() is not None:
                 err_msg = f"server.py exited prematurely (code {server_proc.returncode}); see {server_log_path}"
                 return 1
+
+        # T5: probe immediately before start_measuring (after server up)
+        probe_ppk2_digital(ppk2, "T5-pre-start-measuring", 1.0)
 
         # 6. Start PPK2 sampling
         log("[ppk2] start_measuring")
@@ -676,9 +761,16 @@ def main(argv: list[str] | None = None) -> int:
                 digital = res[1] if isinstance(res, tuple) and len(res) > 1 else None
                 write_batch(s, digital)
 
-            # Progress log every 30 seconds
+            # Progress log every 30 seconds + STM32 ODR snapshot
             if time.time() - last_progress_log > 30.0:
                 log(f"[drain] elapsed {elapsed:.0f}s, {samples_collected} samples so far")
+                # T6: periodic STM32 ODR (cheap — single SWD read, but interrupts CPU)
+                # Disabled by default to avoid interfering with measurements.
+                # Enable by setting --probe-odr flag (we always log periodically though)
+                if getattr(args, "probe_odr", False):
+                    odr = probe_stm32_odr()
+                    if odr is not None:
+                        log(f"[drain-odr] STM32 ODR @ t={elapsed:.0f}s = 0x{odr:08x}")
                 last_progress_log = time.time()
 
             time.sleep(DRAIN_INTERVAL_S)
@@ -799,6 +891,22 @@ def main(argv: list[str] | None = None) -> int:
         unique_gpio = sorted(gpio_counts.keys())
         total = sum(gpio_counts.values())
         log(f"[validate] gpio_byte unique values: {unique_gpio} (total {total} samples)")
+        # Per-bit analysis: which D-channels actually toggle?
+        bit_changes = {}
+        for bit in range(8):
+            seen_high = any((v >> bit) & 1 for v in unique_gpio)
+            seen_low = any(((v >> bit) & 1) == 0 for v in unique_gpio)
+            if seen_high and seen_low:
+                bit_changes[bit] = "TOGGLE"
+            elif seen_high:
+                bit_changes[bit] = "stuck-1"
+            else:
+                bit_changes[bit] = "stuck-0"
+        log(f"[validate] per-bit: " + ", ".join(f"D{b}={s}" for b, s in bit_changes.items()))
+        # D0=PA0 (compute), D1=PA1 (wait), D2=PA4 (uart Mode C)
+        # Expected for Mode A: D0=TOGGLE, D1=TOGGLE, D2=stuck-0
+        # Expected for Mode B: D0=TOGGLE, D1=stuck-0, D2=stuck-0
+
         if unique_gpio == [0]:
             log("[validate] FAIL: gpio_byte stuck at 0 — PPK2 digital capture broken")
             log("[validate]       Cannot do phase-resolved analysis without diversity")

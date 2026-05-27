@@ -80,12 +80,19 @@ for attempt in range(1, MAX_RETRIES + 1):
             print("\n  Aborted by user")
             sys.exit(2)
         # Verify PPK2 came back
-        for i in range(20):
+        for i in range(30):
             if find_port():
+                print(f"  ✓ PPK2 re-enumerated after {i*0.5:.1f}s")
                 break
             time.sleep(0.5)
         else:
             print("  ⚠ PPK2 not seen after replug — check connection")
+            continue
+        # CRITICAL: PPK2 needs ~10s after re-plug for internal state to
+        # stabilize before D-channel sampling works correctly. Re-plugging
+        # is NOT instantaneous — the PPK2 firmware needs time to initialize.
+        print("  ⏳ Waiting 10s for PPK2 internal stabilization...")
+        time.sleep(10)
     else:
         print(f"  ✗ FAILED after {MAX_RETRIES} attempts — aborting")
         sys.exit(1)
