@@ -410,10 +410,19 @@ class PPK2Backend:
         *,
         voltage_mV: int = DEFAULT_VOLTAGE_MV,
         settle_s: float = DEFAULT_SETTLE_S,
+        keep_dut_powered: bool = False,
     ) -> None:
         self.serial_port = serial_port
         self.voltage_mV = voltage_mV
         self.settle_s = settle_s
+        # keep_dut_powered=True: assume DUT is already powered by an
+        # external PPK2 hold script (used by full_regression.sh). The
+        # backend will NOT call set_source_voltage / use_source_meter /
+        # toggle_DUT_power — it only opens the serial connection to
+        # read samples in passive mode. This avoids the USB conflict
+        # that would arise if two processes both opened the PPK2 for
+        # active control.
+        self.keep_dut_powered = keep_dut_powered
 
     def measure_replica(
         self,
@@ -455,19 +464,26 @@ class PPK2Backend:
             ppk2.get_modifiers()
             log_fp.write(f"[{time.time():.3f}] get_modifiers OK\n")
 
-            # 2. Configure
-            ppk2.set_source_voltage(self.voltage_mV)
-            ppk2.use_source_meter()
-            log_fp.write(f"[{time.time():.3f}] Source mode @ {self.voltage_mV} mV\n")
+            # 2. Configure (skip when keep_dut_powered — DUT is already
+            # being held by an external PPK2 process; we only sample.)
+            if not self.keep_dut_powered:
+                ppk2.set_source_voltage(self.voltage_mV)
+                ppk2.use_source_meter()
+                log_fp.write(f"[{time.time():.3f}] Source mode @ {self.voltage_mV} mV\n")
+            else:
+                log_fp.write(f"[{time.time():.3f}] keep_dut_powered=True; skipping source-mode config\n")
 
             # 3. CSV setup
             csv_fp = csv_out.open("w", encoding="utf-8", newline="")
             writer = csv_mod.writer(csv_fp)
             writer.writerow(["timestamp_us", "current_uA", "voltage_V", "gpio_byte"])
 
-            # 4. Power on, wait for STM32 to boot
-            ppk2.toggle_DUT_power("ON")
-            time.sleep(self.settle_s)
+            # 4. Power on, wait for STM32 to boot (skip when keep_dut_powered)
+            if not self.keep_dut_powered:
+                ppk2.toggle_DUT_power("ON")
+                time.sleep(self.settle_s)
+            else:
+                log_fp.write(f"[{time.time():.3f}] keep_dut_powered=True; skipping power-on\n")
             log_fp.write(f"[{time.time():.3f}] DUT powered, settled\n")
 
             # 5. Start measuring
@@ -552,7 +568,13 @@ class PPK2Backend:
 
             # 7. Stop
             ppk2.stop_measuring()
-            ppk2.toggle_DUT_power("OFF")
+            if not self.keep_dut_powered:
+
+                ppk2.toggle_DUT_power("OFF")
+
+            else:
+
+                pass  # keep_dut_powered: leave DUT powered for next replica
             log_fp.write(f"[{time.time():.3f}] Stopped, DUT off\n")
             # log_fp closed in finally — Bug #6 fix
 

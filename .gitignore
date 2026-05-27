@@ -63,3 +63,8 @@ report/main.tex.bak
 commit_and_sanity.sh
 do_everything.sh
 analysis/dedekind_discovery_final_v46.md
+
+# Day 5 additions
+*.diff
+*.pre-energy-backup
+*.pre-*-backup

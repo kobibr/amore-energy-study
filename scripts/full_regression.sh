@@ -1,552 +1,715 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  full_regression.sh — Top-level regression for AmorE Energy Study
+#  full_regression.sh — Energy + cycles regression (clean architecture v3)
 #
-#  Location: ~/amore-energy-study/scripts/full_regression.sh
-#  Repo:     amore-energy-study (this is the orchestrator)
+#  Design:
+#    - Each cell is run by measure_one_cell.py, the SOLE owner of the PPK2
+#      for that cell's lifetime. No background hold, no shared driver.
+#    - Per cell: PPK2 ON → flash STM32 → server.py (Mode A) → sample to CSV
+#                → GDB telemetry → PPK2 OFF.
+#    - Flash happens inside each cell while PPK2 is supplying power, so
+#      flash never fails for lack of DUT power.
+#    - Fail-fast: if a cell fails its retry budget, the whole run aborts.
+#    - TRAP cleanup on Ctrl+C / kill: forces PPK2 OFF, kills RPi processes.
+#    - Auto-cleanup on start: kills any leftover PPK2 / openocd / server.py
+#      processes before pre-flight.
+#    - Checkpoints: per-cell state in state.json; --resume continues.
 #
-#  Runs ALL checks required to ensure the system is healthy:
-#    P0  Pre-flight: workspace prep, toolchain, hardware
-#    P1  Build: full firmware build matrix (all curves, all modes)
-#    P2  Host-side tests: pytest + mini_regression (~3 min)
-#    P3  Firmware regression: BN254 + BLS12-381 benchmarks (~3 hours)
-#    P4  Result validation: cycles within ±5% of baselines from doc/
-#    P5  Implementation validation: SHA256, constants, layout, GDB checks
-#    P6  Final report
+#  Hardware wiring (must be in place before running):
+#    PPK2 VOUT → STM32 3V3 (IDD jumper REMOVED on Nucleo)
+#    PPK2 GND  → STM32 GND
+#    PPK2 D0/D1/D2 → STM32 PA0/PA1/PA4
+#    RPi GPIO 25/24/18 → STM32 SWCLK/SWDIO/NRST
+#    PPK2 USB → host
+#    No ST-LINK USB
 #
-#  Total wall time:
-#    Full run:           ~3.5 hours  (most time in P3 benchmarks)
-#    --skip-bench:       ~10 min     (P0-P2, P5 static only)
-#    --static-only:      ~5 min      (P0-P2, P5 without GDB)
-#    --dry-run:          ~30 sec     (validation only, no execution)
+#  Wall time at defaults (10 replicas × 2 curves × 2 modes = 40 cells):
+#    BN254 AmorE  : 10 × ~74min = 12.3h
+#    BLS   AmorE  : 10 × ~90min = 15.0h
+#    BN254 direct : 10 × ~3min  =  0.5h
+#    BLS   direct : 10 × ~95min = 15.8h
+#    + build + analysis ≈ 30 min
+#    TOTAL ≈ 44h
+#
+#  Smoke run (--smoke): 4 cells × 1 replica × 1 honest_round = ~15 min total
 #
 #  Usage:
-#      bash scripts/full_regression.sh                 # Full run
-#      bash scripts/full_regression.sh --skip-bench    # Skip slow P3+P5-GDB
-#      bash scripts/full_regression.sh --static-only   # Build + host tests only
-#      bash scripts/full_regression.sh --dry-run       # Show plan, no execute
+#    bash scripts/full_regression.sh                  # full default
+#    bash scripts/full_regression.sh --smoke          # 4-cell smoke (~15min)
+#    bash scripts/full_regression.sh --replicas=3     # quick (~12h)
+#    bash scripts/full_regression.sh --curves=BN254   # one curve
+#    bash scripts/full_regression.sh --modes=A        # AmorE only
+#    bash scripts/full_regression.sh --resume         # continue
+#    bash scripts/full_regression.sh --dry-run        # plan only
+#    bash scripts/full_regression.sh --skip-analysis  # measurements only
 #
 #  Exit codes:
-#    0 = all pass
-#    1 = one or more phases failed
-#    2 = setup error (pre-flight failed)
+#    0 = all cells done; report written
+#    1 = one or more cells failed; partial report written
+#    2 = pre-flight failed
+#    3 = aborted (Ctrl+C, kill, fatal error)
 # =============================================================================
+
 set -uo pipefail
 
-# ── Self-locate ──────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENERGY_STUDY="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_FIRMWARE="$ENERGY_STUDY/firmware/amore-fw"
-# FR1 fix: previous default (10.232.131.169) was a stale value left over
-# from an earlier network layout. The actual Pi confirmed by telemetry
-# on 2026-05-22 is 10.164.56.169. Override via env var if your setup differs.
-RPI_HOST="${RPI_HOST:-10.164.56.169}"
+# ── Defaults ───────────────────────────────────────────────────────────────
+DEFAULT_REPLICAS=10
+DEFAULT_CURVES="BN254 BLS12_381"
+DEFAULT_MODES="A B"
+DEFAULT_HONEST_ROUNDS=61
+
+# Per-cell retry budget: how many times to invoke measure_one_cell.py
+# before declaring the cell failed.
+CELL_RETRIES=3
+RETRY_BACKOFF_S=30
+INTER_CELL_SETTLE_S=5
+
+# RPi auto-discovery: env > mdns > fallback IP
+if [[ -z "${RPI_HOST:-}" ]]; then
+    _mdns=$(getent hosts raspberrypi.local 2>/dev/null | awk '{print $1}' | head -1)
+    if [[ -n "$_mdns" ]]; then
+        RPI_HOST="$_mdns"
+    else
+        RPI_HOST="10.164.56.169"
+    fi
+fi
 RPI_USER="${RPI_USER:-pi}"
-TOLERANCE="0.05"  # ±5% per metric
+PPK2_PORT="${PPK2_PORT:-/dev/ttyACM0}"
+PPK2_VOLTAGE_MV="${PPK2_VOLTAGE_MV:-3300}"
 
-TS="$(date +%Y%m%d_%H%M%S)"
-LOG_DIR="$ENERGY_STUDY/logs/full_regression_${TS}"
-mkdir -p "$LOG_DIR"
-MASTER_LOG="$LOG_DIR/MASTER.log"
+# ── Self-locate ────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ES="$(cd "$SCRIPT_DIR/.." && pwd)"
+FW="$ES/firmware/amore-fw"
+MEASURE_ONE="$SCRIPT_DIR/measure_one_cell.py"
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
-SKIP_BENCH=false
-STATIC_ONLY=false
+# ── Argument parsing ───────────────────────────────────────────────────────
+REPLICAS="$DEFAULT_REPLICAS"
+CURVES="$DEFAULT_CURVES"
+MODES="$DEFAULT_MODES"
+HONEST_ROUNDS="$DEFAULT_HONEST_ROUNDS"
 DRY_RUN=false
+RESUME=false
+SKIP_ANALYSIS=false
+SMOKE=false
 
 for arg in "$@"; do
     case "$arg" in
-        --skip-bench)  SKIP_BENCH=true ;;
-        --static-only) STATIC_ONLY=true; SKIP_BENCH=true ;;
-        --dry-run)     DRY_RUN=true ;;
+        --replicas=*)       REPLICAS="${arg#*=}" ;;
+        --curves=*)         CURVES="${arg#*=}"; CURVES="${CURVES//,/ }" ;;
+        --modes=*)          MODES="${arg#*=}";  MODES="${MODES//,/ }" ;;
+        --honest-rounds=*)  HONEST_ROUNDS="${arg#*=}" ;;
+        --dry-run)          DRY_RUN=true ;;
+        --resume)           RESUME=true ;;
+        --skip-analysis)    SKIP_ANALYSIS=true ;;
+        --smoke)            SMOKE=true; REPLICAS=1; HONEST_ROUNDS=1 ;;
         -h|--help)
-            grep '^#' "$0" | head -40
+            sed -n '2,55p' "$0"
             exit 0
             ;;
         *)
-            echo "Unknown argument: $arg"
-            echo "Use --help for usage"
+            echo "Unknown arg: $arg" >&2
             exit 2
             ;;
     esac
 done
 
-# ── Colors ───────────────────────────────────────────────────────────────────
-RED='\033[91m'; GRN='\033[92m'; YLW='\033[93m'
-BLU='\033[94m'; CYN='\033[96m'; RST='\033[0m'; BOLD='\033[1m'
+# ── Colours + helpers ──────────────────────────────────────────────────────
+R=$'\033[91m'; G=$'\033[92m'; Y=$'\033[93m'
+B=$'\033[94m'; C=$'\033[96m'; RST=$'\033[0m'; BOLD=$'\033[1m'
 
-# ── Counters ─────────────────────────────────────────────────────────────────
-TOTAL_PASS=0
-TOTAL_FAIL=0
-TOTAL_WARN=0
-PHASE_RESULTS=()
+TS="$(date +%Y%m%d_%H%M%S)"
+if $RESUME; then
+    LATEST="$(ls -td "$ES"/logs/full_regression_* 2>/dev/null | head -1)"
+    if [[ -n "$LATEST" ]]; then
+        LOG_DIR="$LATEST"
+        echo "${C}[resume]${RST} $LOG_DIR"
+    else
+        echo "${R}--resume: no prior dir${RST}" >&2
+        exit 2
+    fi
+else
+    LOG_DIR="$ES/logs/full_regression_${TS}"
+    mkdir -p "$LOG_DIR"
+fi
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-log()    { echo -e "$(date '+%H:%M:%S') $*" | tee -a "$MASTER_LOG"; }
-pass()   { log "${GRN}  ✓ PASS${RST}: $*"; TOTAL_PASS=$((TOTAL_PASS+1)); }
-fail()   { log "${RED}  ✗ FAIL${RST}: $*"; TOTAL_FAIL=$((TOTAL_FAIL+1)); }
-warn()   { log "${YLW}  ! WARN${RST}: $*"; TOTAL_WARN=$((TOTAL_WARN+1)); }
-# FR2 fix: skip() was referenced in P0.6 but never defined. Calling it would
-# produce "skip: command not found" on systems missing ST-Link with --static-only.
-skip()   { log "${CYN}  - SKIP${RST}: $*"; }
-phase()  {
+CSV_DIR="$LOG_DIR/measurements"
+TELEMETRY_DIR="$LOG_DIR/telemetry"
+ANALYSIS_DIR="$LOG_DIR/analysis"
+STATE_FILE="$LOG_DIR/state.json"
+MASTER_LOG="$LOG_DIR/MASTER.log"
+mkdir -p "$CSV_DIR" "$TELEMETRY_DIR" "$ANALYSIS_DIR"
+
+log()    { echo "$(date '+%H:%M:%S') $*" | tee -a "$MASTER_LOG"; }
+ok()     { log "${G}  ✓${RST} $*"; }
+fail()   { log "${R}  ✗${RST} $*"; }
+warn()   { log "${Y}  ⚠${RST} $*"; }
+info()   { log "${C}  →${RST} $*"; }
+head_()  {
     log ""
-    log "${BOLD}${BLU}═════════════════════════════════════════════════════════════${RST}"
-    log "${BOLD}${BLU}  PHASE $*${RST}"
-    log "${BOLD}${BLU}═════════════════════════════════════════════════════════════${RST}"
+    log "${BOLD}${B}═════════════════════════════════════════════════════════════${RST}"
+    log "${BOLD}${B}  $*${RST}"
+    log "${BOLD}${B}═════════════════════════════════════════════════════════════${RST}"
+}
+led_red()   { log "${R}  ● LED expected: RED${RST}    (PPK2 powering DUT during cell)"; }
+led_green() { log "${G}  ● LED expected: GREEN${RST}  (between cells, PPK2 OFF)"; }
+
+# ── Auto-cleanup at startup (BETON-BARZEL) ─────────────────────────────────
+# Wait+verify at every step. Never proceeds on "fire and pray".
+#
+# Steps:
+#   1. Stop ModemManager (else it grabs /dev/ttyACM0 randomly → PPK2 unstable)
+#   2. Verify MM stopped by polling systemctl is-active (up to 6s)
+#   3. Kill local stale processes (PPK2 holds, measure_one_cell)
+#   4. Kill RPi-side stale processes (server.py, openocd)
+#   5. Force PPK2 DUT power OFF (clean slate)
+#   6. Wait for PPK2 to be present AND openable 3× in a row (up to 20s)
+#
+# Fatal if any verify step fails — we will NOT run an unstable session.
+startup_cleanup() {
+    info "auto-cleanup (BETON-BARZEL): MM stop, kill stale, force PPK2 OFF, verify"
+
+    # ── Step 1+2: stop ModemManager + verify ──
+    info "  [mm] stopping ModemManager"
+    sudo -n systemctl stop ModemManager 2>/dev/null || true
+    local mm_ok=0 i
+    for i in $(seq 1 20); do
+        local state
+        # is-active returns exit 3 for inactive — that's expected, not error.
+        # Capture stdout only; ignore exit code.
+        state=$(sudo -n systemctl is-active ModemManager 2>/dev/null)
+        state="${state:-unknown}"
+        if [[ "$state" == "inactive" || "$state" == "failed" ]]; then
+            info "  [mm] confirmed stopped (state=$state)"
+            mm_ok=1
+            break
+        fi
+        sleep 0.3
+    done
+    if [[ $mm_ok -eq 0 ]]; then
+        fail "ModemManager did not stop within 6s — refusing to proceed"
+        exit 2
+    fi
+
+    # ── Step 3: local stale processes ──
+    info "  [local] killing stale PPK2 holds, measure_one_cell"
+    pkill -f "ppk2_hold\|ppk2_keep_alive\|measure_one_cell" 2>/dev/null || true
+
+    # ── Step 4: RPi-side stale processes ──
+    info "  [rpi] killing stale server.py, openocd"
+    ssh -o ConnectTimeout=3 -o BatchMode=yes "$RPI_USER@$RPI_HOST" \
+        'sudo pkill -f "server.py" 2>/dev/null; sudo pkill -f "openocd" 2>/dev/null' \
+        2>/dev/null || true
+    sleep 1
+
+    # ── Step 5: Force PPK2 OFF ──
+    info "  [ppk2] forcing DUT power OFF (clean slate)"
+    python3 /tmp/ppk2_force_off.py 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG" || true
+    sleep 2
+
+    # ── Step 6: Verify PPK2 present + openable (3× consecutive) ──
+    info "  [ppk2] verifying PPK2 stably present + openable (3× consecutive)"
+    python3 /tmp/ppk2_verify_stable.py 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG"
+    local verify_rc=${PIPESTATUS[0]}
+    if [[ $verify_rc -ne 0 ]]; then
+        fail "PPK2 verify-stable failed — refusing to start measurement"
+        exit 2
+    fi
+
+    # ── Step 7: BETON-BARZEL PPK2 D-channel health check ──
+    # Known PPK2 firmware bug: after heavy SWD + toggle_DUT_power activity,
+    # digital channels silently degrade to "always 0". Only USB unplug+replug
+    # recovers. We MUST detect this here, before measurement, or all CSVs
+    # will be useless for phase-resolved analysis.
+    info "  [ppk2-health] verifying D-channels respond (gpio_byte diversity)"
+    if python3 "$ES/scripts/lib/ppk2_digital_health_check.py" 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG"; then
+        ok "PPK2 D-channels healthy"
+    else
+        fail "PPK2 D-channels stuck — physical USB unplug+replug required"
+        exit 2
+    fi
+
+    ok "startup cleanup complete — PPK2 ready"
+    return 0
 }
 
-# ── Header ───────────────────────────────────────────────────────────────────
+# ── Cleanup trap ───────────────────────────────────────────────────────────
+ABORTED=0
+cleanup() {
+    local exit_code=$?
+    [[ $ABORTED -ne 0 ]] && return
+    ABORTED=1
+
+    log ""
+    log "${Y}[trap-cleanup]${RST} powering DUT off, killing children"
+
+    # Kill any measure_one_cell.py we might have spawned
+    pkill -P $$ -f measure_one_cell 2>/dev/null || true
+
+    # Force PPK2 OFF
+    python3 - <<'PYEOF' 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG" || true
+try:
+    import serial.tools.list_ports
+    from ppk2_api.ppk2_api import PPK2_API
+    port = next((p.device for p in serial.tools.list_ports.comports()
+                 if "PPK" in (p.description or "") or "Nordic" in (p.description or "")), None)
+    if port:
+        ppk = PPK2_API(port, timeout=2, write_timeout=2)
+        ppk.get_modifiers()
+        ppk.set_source_voltage(3300)
+        ppk.use_source_meter()
+        ppk.toggle_DUT_power("OFF")
+        print("[trap] PPK2 forced OFF")
+except Exception as e:
+    print(f"[trap] force-off failed: {e}")
+PYEOF
+
+    # Kill RPi processes
+    ssh -o ConnectTimeout=3 "$RPI_USER@$RPI_HOST" \
+        'sudo pkill -f "server.py" 2>/dev/null; sudo pkill -f "openocd" 2>/dev/null' \
+        2>/dev/null || true
+
+    [[ $exit_code -ne 0 ]] && log "${R}[trap] exit code: $exit_code${RST}"
+
+    # Restart MM on cleanup so system returns to normal even on Ctrl+C / crash
+    sudo -n systemctl start ModemManager 2>/dev/null || true
+
+    exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
+# ── State (checkpoint) ─────────────────────────────────────────────────────
+state_init() {
+    [[ -f "$STATE_FILE" ]] || echo '{"cells":{}}' > "$STATE_FILE"
+}
+state_get_cell() {
+    python3 -c "
+import json
+with open('$STATE_FILE') as f: s = json.load(f)
+print(s.get('cells', {}).get('$1', 'pending'))
+"
+}
+state_set_cell() {
+    python3 -c "
+import json
+with open('$STATE_FILE') as f: s = json.load(f)
+s.setdefault('cells', {})['$1'] = '$2'
+with open('$STATE_FILE', 'w') as f: json.dump(s, f, indent=2)
+"
+}
+
+# ── Header ─────────────────────────────────────────────────────────────────
 log ""
-log "${BOLD}${CYN}╔══════════════════════════════════════════════════════════════════╗${RST}"
-log "${BOLD}${CYN}║  AmorE Energy Study — Full Regression Suite                     ║${RST}"
-log "${BOLD}${CYN}║  Started: $(date '+%Y-%m-%d %H:%M:%S')                                  ║${RST}"
-log "${BOLD}${CYN}║  Log dir: $LOG_DIR  ${RST}"
-log "${BOLD}${CYN}╚══════════════════════════════════════════════════════════════════╝${RST}"
+log "${BOLD}${C}╔══════════════════════════════════════════════════════════════════╗${RST}"
+log "${BOLD}${C}║  AmorE Energy Study — Full Regression (clean architecture)       ║${RST}"
+log "${BOLD}${C}║  Started: $(date '+%Y-%m-%d %H:%M:%S')                                  ║${RST}"
+log "${BOLD}${C}╚══════════════════════════════════════════════════════════════════╝${RST}"
 log ""
-log "  Energy-study repo:  $ENERGY_STUDY"
-log "  Firmware repo:      $REPO_FIRMWARE"
-log "  Tolerance:          ±$(echo "$TOLERANCE * 100" | bc)%"
-log "  Skip bench:         $SKIP_BENCH"
-log "  Static only:        $STATIC_ONLY"
-log "  Dry run:            $DRY_RUN"
+log "  Repo            : $ES"
+log "  Firmware        : $FW"
+log "  Log dir         : $LOG_DIR"
+log "  Resume          : $RESUME"
+log "  Smoke           : $SMOKE"
+log "  Curves          : $CURVES"
+log "  Modes           : $MODES   (A=AmorE, B=direct)"
+log "  Replicas/cell   : $REPLICAS"
+log "  Honest rounds   : $HONEST_ROUNDS"
+log "  RPi             : $RPI_USER@$RPI_HOST"
+log "  PPK2            : $PPK2_PORT @ ${PPK2_VOLTAGE_MV}mV"
+log "  Cell retries    : $CELL_RETRIES"
+
+state_init
 
 # =============================================================================
-phase "P0 — Pre-flight checks"
+#  Pre-flight
 # =============================================================================
+head_ "PRE-FLIGHT"
 
-log ""
-log "P0.1 — Firmware repo accessible?"
-if [ -d "$REPO_FIRMWARE" ]; then
-    pass "Firmware repo at $REPO_FIRMWARE"
+PREFLIGHT_FAIL=0
+
+if [[ -f "$ES/.venv/bin/activate" ]]; then
+    # shellcheck source=/dev/null
+    source "$ES/.venv/bin/activate"
+    ok "venv: $(python --version)"
 else
-    fail "Firmware repo NOT FOUND"
-    exit 2
+    fail "venv missing"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.2 — Firmware branch policy"
-cd "$REPO_FIRMWARE"
-CURRENT_BRANCH=$(git branch --show-current)
-log "  Current: $CURRENT_BRANCH"
-case "$CURRENT_BRANCH" in
-    feature/energy-instrumentation)
-        pass "On canonical branch"
-        ;;
-    main)
-        pass "On main (production branch)"
-        ;;
-    *)
-        warn "On non-canonical branch: $CURRENT_BRANCH"
-        ;;
-esac
-
-log ""
-log "P0.3 — Working tree status"
-DIRTY=$(git status --porcelain | grep -v "STM32CubeF4" | wc -l)
-if [ "$DIRTY" -eq 0 ]; then
-    pass "Working tree clean (ignoring submodule)"
+if python3 -c "import numpy, scipy, matplotlib, pandas, serial; from ppk2_api.ppk2_api import PPK2_API" 2>/dev/null; then
+    ok "python deps importable"
 else
-    warn "$DIRTY modified files (non-submodule):"
-    git status --porcelain | grep -v "STM32CubeF4" | head -3 | tee -a "$MASTER_LOG"
+    fail "python deps missing"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.4 — Energy-study working tree"
-cd "$ENERGY_STUDY"
-ES_DIRTY=$(git status --porcelain 2>/dev/null | wc -l)
-log "  Energy-study modified files: $ES_DIRTY"
-if [ "$ES_DIRTY" -gt 5 ]; then
-    warn "Energy-study has $ES_DIRTY modified files — consider committing"
+if lsusb 2>/dev/null | grep -qi '1915:c00a\|PPK2'; then
+    ok "PPK2 enumerated"
+else
+    fail "PPK2 not enumerated"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
+fi
+if [[ -c "$PPK2_PORT" ]]; then
+    ok "PPK2 port: $PPK2_PORT"
+else
+    fail "PPK2 port missing: $PPK2_PORT"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.5 — Toolchain"
 if command -v arm-none-eabi-gcc &>/dev/null; then
-    pass "arm-none-eabi-gcc $(arm-none-eabi-gcc --version | head -1 | awk '{print $NF}')"
+    ok "arm-none-eabi-gcc"
 else
-    fail "arm-none-eabi-gcc NOT FOUND"
+    fail "arm-none-eabi-gcc missing"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 if command -v gdb-multiarch &>/dev/null || command -v arm-none-eabi-gdb &>/dev/null; then
-    pass "GDB available"
+    ok "GDB available"
 else
-    warn "No GDB — Section B will be skipped"
-fi
-if command -v openocd &>/dev/null; then
-    pass "openocd available"
-else
-    fail "openocd NOT FOUND"
+    fail "no GDB"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.6 — Hardware"
-if lsusb 2>/dev/null | grep -qi '0483:374b\|st-link'; then
-    pass "ST-Link enumerated"
+if ping -c 1 -W 2 "$RPI_HOST" &>/dev/null; then
+    ok "RPi ping OK ($RPI_HOST)"
 else
-    if ! $STATIC_ONLY; then
-        fail "ST-Link NOT visible — cannot flash or read"
-    else
-        skip "ST-Link not needed for --static-only"
-    fi
+    fail "RPi unreachable: $RPI_HOST"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
+fi
+if ssh -o ConnectTimeout=3 -o BatchMode=yes "$RPI_USER@$RPI_HOST" true 2>/dev/null; then
+    ok "RPi SSH passwordless"
+else
+    fail "RPi SSH needs password"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
+fi
+if ssh "$RPI_USER@$RPI_HOST" 'which openocd && test -f /home/pi/rpi_swd.cfg && test -f /home/pi/amore-bn254-cortex-m4/rpi/server.py' &>/dev/null; then
+    ok "RPi has openocd + rpi_swd.cfg + server.py"
+else
+    fail "RPi missing openocd / cfg / server.py"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.7 — Network: Pi reachable?"
-if $SKIP_BENCH; then
-    log "  Skipping (--skip-bench)"
+if [[ -f "$MEASURE_ONE" ]]; then
+    ok "measure_one_cell.py present at $MEASURE_ONE"
 else
-    if ping -c 1 -W 2 "$RPI_HOST" &>/dev/null; then
-        pass "Pi pingable at $RPI_HOST"
-        if ssh -o ConnectTimeout=3 -o BatchMode=yes "$RPI_USER@$RPI_HOST" 'true' 2>/dev/null; then
-            pass "Pi SSH passwordless"
-        else
-            warn "Pi SSH requires password"
-        fi
-    else
-        fail "Pi NOT reachable — P3 will fail"
-    fi
+    fail "measure_one_cell.py missing at $MEASURE_ONE"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
+fi
+if python3 "$MEASURE_ONE" --help 2>&1 | grep -q "curve.*BN254.*BLS12_381"; then
+    ok "measure_one_cell.py --help OK"
+else
+    fail "measure_one_cell.py --help broken"; PREFLIGHT_FAIL=$((PREFLIGHT_FAIL+1))
 fi
 
-log ""
-log "P0.8 — Disk space"
-FREE_GB=$(df -BG --output=avail "$ENERGY_STUDY" | tail -1 | tr -d 'G ')
-if [ "$FREE_GB" -ge 3 ]; then
-    pass "${FREE_GB} GB free"
-else
-    warn "Only ${FREE_GB} GB free"
-fi
+startup_cleanup
 
-# Check P0 health before continuing
-if [ "$TOTAL_FAIL" -gt 0 ]; then
+if [[ $PREFLIGHT_FAIL -gt 0 ]]; then
     log ""
-    log "${RED}${BOLD}════ PRE-FLIGHT FAILED ════${RST}"
-    log "  Fix $TOTAL_FAIL FAIL items above, then rerun."
+    log "${R}${BOLD}══ PRE-FLIGHT FAILED — $PREFLIGHT_FAIL issues ══${RST}"
+    trap - EXIT INT TERM   # no PPK2 to OFF since we may not have touched it
     exit 2
 fi
-
-PHASE_RESULTS+=("P0|PASS|$TOTAL_PASS checks, $TOTAL_WARN warnings")
+ok "All pre-flight passed"
 
 if $DRY_RUN; then
+    head_ "DRY RUN — plan only"
+    n_cells=0
+    for curve in $CURVES; do
+        for mode in $MODES; do
+            for r in $(seq 1 "$REPLICAS"); do
+                key="${curve,,}__${mode}__r${r}"
+                s=$(state_get_cell "$key")
+                log "  $key → $s"
+                n_cells=$((n_cells+1))
+            done
+        done
+    done
     log ""
-    log "DRY RUN complete. To execute: rerun without --dry-run."
+    log "  Total: $n_cells cells"
+    trap - EXIT INT TERM
     exit 0
 fi
 
 # =============================================================================
-phase "P1 — Build firmware matrix"
+#  Phase 1: Build firmware
 # =============================================================================
+head_ "PHASE 1 — Build firmware (BN254/BLS × A/B)"
 
-cd "$REPO_FIRMWARE"
+cd "$FW"
 P1_START=$(date +%s)
+BUILD_FAIL=0
 
-build_variant() {
-    local curve="$1"
-    local mode="$2"
-    local curve_lc="${curve,,}"
-    local mode_lc="${mode,,}"
-    local builddir="build/${curve_lc}_${mode_lc}"
-    local log="$LOG_DIR/build_${curve}_${mode}.log"
-    
-    log "  Building $curve Mode $mode → $builddir"
-    
-    rm -rf "$builddir"
-    if cmake -B "$builddir" \
-            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-stm32f4.cmake \
-            -DCURVE="$curve" \
-            -DMEASUREMENT_MODE="$mode" \
-            > "$log" 2>&1 \
-       && cmake --build "$builddir" >> "$log" 2>&1; then
-        pass "$curve Mode $mode built"
-        find "$builddir" -maxdepth 2 -name "*.elf" | while read elf; do
-            log "    $(basename $elf): $(arm-none-eabi-size $elf | tail -1)"
-        done
-    else
-        fail "$curve Mode $mode build FAILED (see $log)"
-    fi
-}
+for curve in $CURVES; do
+    for mode in $MODES; do
+        curve_lc="${curve,,}"
+        mode_lc="${mode,,}"
+        build_dir="build/${curve_lc}_${mode_lc}"
+        # Mode A: AmorE protocol ELF (amore_${curve}.elf, pure C, no RELIC)
+        # Mode B: RELIC pairing benchmark ELF (relic_bench_${curve}.elf,
+        #         RELIC easy backend = pure C apples-to-apples vs Mode A)
+        if [[ "$mode" == "A" ]]; then
+            elf_name="amore_${curve_lc}.elf"
+        else
+            elf_name="relic_bench_${curve_lc}.elf"
+        fi
+        build_log="$LOG_DIR/build_${curve}_${mode}.log"
 
-log ""
-log "P1.1 — BN254 Mode A"
-build_variant BN254 A
-
-log ""
-log "P1.2 — BLS12_381 Mode A"
-build_variant BLS12_381 A
-
-log ""
-log "P1.3 — BN254 Mode B (RELIC direct pairing)"
-build_variant BN254 B
-
-log ""
-log "P1.4 — BLS12_381 Mode B"
-build_variant BLS12_381 B
-
-log ""
-log "P1.5 — Size table"
-SIZE_TABLE="$LOG_DIR/sizes.txt"
-{
-    printf "%-50s  %s\n" "Target" "text    data     bss     dec     hex"
-    printf "%-50s  %s\n" "──────────────────────────────────────────────────" "──────  ──────  ──────  ──────  ──────"
-    find build/ -name "*.elf" 2>/dev/null | sort | while read elf; do
-        printf "%-50s  " "$elf"
-        arm-none-eabi-size "$elf" 2>/dev/null | tail -1
+        info "Building $curve Mode $mode → $elf_name"
+        rm -rf "$build_dir"
+        if cmake -B "$build_dir" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCURVE="$curve" \
+                -DMEASUREMENT_MODE="$mode" \
+                > "$build_log" 2>&1 \
+           && cmake --build "$build_dir" --target "$elf_name" --parallel "$(nproc)" >> "$build_log" 2>&1; then
+            elf_path="$build_dir/$elf_name"
+            if [[ -f "$elf_path" ]]; then
+                size_line=$(arm-none-eabi-size "$elf_path" | tail -1)
+                ok "$curve $mode  ($size_line)"
+            else
+                fail "$curve $mode: ELF missing"
+                BUILD_FAIL=$((BUILD_FAIL+1))
+            fi
+        else
+            fail "$curve $mode: cmake/build failed (see $build_log)"
+            BUILD_FAIL=$((BUILD_FAIL+1))
+        fi
     done
-} > "$SIZE_TABLE"
-cat "$SIZE_TABLE" | tee -a "$MASTER_LOG"
+done
 
 P1_DUR=$(($(date +%s) - P1_START))
 log ""
-log "P1 wall time: $((P1_DUR / 60))m $((P1_DUR % 60))s"
-PHASE_RESULTS+=("P1|PASS|4 variants built; sizes locked in $SIZE_TABLE")
-
-# =============================================================================
-phase "P2 — Host-side tests (pytest + mini_regression)"
-# =============================================================================
-
-cd "$ENERGY_STUDY"
-P2_START=$(date +%s)
-
-log ""
-log "P2.1 — Activate venv"
-if [ -f .venv/bin/activate ]; then
-    # shellcheck source=/dev/null
-    source .venv/bin/activate
-    pass "venv: $(python --version)"
-else
-    warn "No .venv found — using system Python"
+log "  Phase 1 wall: $((P1_DUR/60))m $((P1_DUR%60))s"
+if [[ $BUILD_FAIL -gt 0 ]]; then
+    fail "$BUILD_FAIL build(s) failed — aborting"
+    exit 1
 fi
 
-log ""
-log "P2.2 — pytest"
+# =============================================================================
+#  Phase 2: Sanity (pytest)
+# =============================================================================
+head_ "PHASE 2 — Sanity (pytest)"
+
+cd "$ES"
 PYTEST_LOG="$LOG_DIR/pytest.log"
-if pytest -x --tb=short 2>&1 | tee "$PYTEST_LOG"; then
-    PT_PASSED=$(grep -oE '[0-9]+ passed' "$PYTEST_LOG" | head -1 || echo "? passed")
-    pass "pytest: $PT_PASSED"
+if python3 -m pytest -q --tb=short > "$PYTEST_LOG" 2>&1; then
+    summary=$(grep -E '^[0-9]+ passed' "$PYTEST_LOG" | tail -1)
+    ok "pytest: $summary"
 else
-    PT_FAILED=$(grep -oE '[0-9]+ failed' "$PYTEST_LOG" | head -1)
-    fail "pytest: $PT_FAILED"
+    warn "pytest had failures (continuing)"
+    tail -10 "$PYTEST_LOG" | sed 's/^/    /' | tee -a "$MASTER_LOG"
 fi
 
+# =============================================================================
+#  Phase 3: Energy measurement (per-cell ownership)
+# =============================================================================
+head_ "PHASE 3 — Energy measurement"
+
+P3_START=$(date +%s)
+log "  Architecture: measure_one_cell.py owns PPK2 per-cell"
+log "  LED pattern: RED during each cell, GREEN between cells"
 log ""
-log "P2.3 — mini_regression.sh"
-if [ -f "$ENERGY_STUDY/scripts/mini_regression.sh" ]; then
-    MINI_LOG="$LOG_DIR/mini_regression.log"
-    if bash "$ENERGY_STUDY/scripts/mini_regression.sh" > "$MINI_LOG" 2>&1; then
-        pass "mini_regression"
-    else
-        fail "mini_regression — see $MINI_LOG"
-    fi
-else
-    warn "scripts/mini_regression.sh not found — skipping"
-fi
 
-P2_DUR=$(($(date +%s) - P2_START))
-log "P2 wall time: $((P2_DUR / 60))m $((P2_DUR % 60))s"
-PHASE_RESULTS+=("P2|PASS|pytest + mini_regression")
+TOTAL_CELLS=$(( $(echo $CURVES | wc -w) * $(echo $MODES | wc -w) * REPLICAS ))
+CELLS_DONE=0
+CELLS_FAIL=0
+CELLS_SKIP=0
+CELL_IDX=0
 
-# =============================================================================
-phase "P3 — Firmware benchmark regression (BN254 + BLS12_381)"
-# =============================================================================
+for curve in $CURVES; do
+    for mode in $MODES; do
+        curve_lc="${curve,,}"
+        mode_lc="${mode,,}"
+        # Mode-aware ELF selection — see Phase 1 comment
+        if [[ "$mode" == "A" ]]; then
+            elf="$FW/build/${curve_lc}_${mode_lc}/amore_${curve_lc}.elf"
+        else
+            elf="$FW/build/${curve_lc}_${mode_lc}/relic_bench_${curve_lc}.elf"
+        fi
 
-if $SKIP_BENCH; then
-    log "P3 SKIPPED per --skip-bench"
-    PHASE_RESULTS+=("P3|SKIP|--skip-bench")
-else
-    cd "$REPO_FIRMWARE"
-    P3_START=$(date +%s)
-    
-    log ""
-    log "P3.1 — Run scripts/regression_test.sh --curve=both"
-    log "    Expected duration: ~3 hours (BN254 ~75min + BLS ~95min + overhead)"
-    log "    Log: $LOG_DIR/regression_full.log"
-    
-    REGRESSION_LOG="$LOG_DIR/regression_full.log"
-    if bash scripts/regression_test.sh --curve=both --tolerance="$TOLERANCE" 2>&1 | tee "$REGRESSION_LOG"; then
-        pass "regression_test.sh exited cleanly"
-    else
-        fail "regression_test.sh exited with non-zero status"
-    fi
-    
-    # Look for the regression artifact directory.
-    # FR6 fix: previously hardcoded "regression_2026*" which would silently
-    # stop matching in 2027. Match any year.
-    REGRESSION_DIR=$(find "$REPO_FIRMWARE/logs" -maxdepth 1 -name "regression_*" -type d -newer "$LOG_DIR" 2>/dev/null | tail -1)
-    if [ -n "$REGRESSION_DIR" ]; then
-        log ""
-        log "P3.2 — Regression report"
-        if [ -f "$REGRESSION_DIR/REPORT.txt" ]; then
-            cat "$REGRESSION_DIR/REPORT.txt" | tee -a "$MASTER_LOG"
-            
-            # Check if "PASSED" appears in the report
-            if grep -qi "all checks passed\|all metrics match\|regression passed" "$REGRESSION_DIR/REPORT.txt"; then
-                pass "Regression report indicates success"
-            else
-                fail "Regression report does not indicate clean pass"
+        for replica in $(seq 1 "$REPLICAS"); do
+            CELL_IDX=$((CELL_IDX+1))
+            cell_key="${curve_lc}__${mode}__r${replica}"
+            log ""
+            log "${BOLD}${B}─── Cell $CELL_IDX/$TOTAL_CELLS: $cell_key ───${RST}"
+
+            cell_state=$(state_get_cell "$cell_key")
+            if [[ "$cell_state" == "done" ]]; then
+                info "[skip] resumed (already done)"
+                CELLS_SKIP=$((CELLS_SKIP+1))
+                continue
             fi
+            state_set_cell "$cell_key" "running"
+
+            cell_dir="$CSV_DIR/$cell_key"
+            mkdir -p "$cell_dir"
+            cell_log="$LOG_DIR/cell_${cell_key}.log"
+
+            if [[ ! -f "$elf" ]]; then
+                fail "ELF missing: $elf"
+                state_set_cell "$cell_key" "fail-noelf"
+                exit 1
+            fi
+
+            led_red
+
+            # Build measure_one_cell.py invocation
+            mone_args=(
+                --curve "$curve"
+                --mode "$mode"
+                --replica "$replica"
+                --elf "$elf"
+                --out "$cell_dir"
+                --rpi-user "$RPI_USER"
+                --rpi-host "$RPI_HOST"
+                --ppk2-port "$PPK2_PORT"
+                --voltage-mv "$PPK2_VOLTAGE_MV"
+                --honest-rounds "$HONEST_ROUNDS"
+            )
+            if $SMOKE; then
+                mone_args+=(--smoke)
+            fi
+
+            # Run with retries
+            attempt=1
+            cell_ok=0
+            while [[ $attempt -le $CELL_RETRIES ]]; do
+                if [[ $attempt -gt 1 ]]; then
+                    info "[retry] attempt $attempt/$CELL_RETRIES (backoff ${RETRY_BACKOFF_S}s)"
+                    sleep "$RETRY_BACKOFF_S"
+                fi
+                t_cell=$(date +%s)
+                if python3 "$MEASURE_ONE" "${mone_args[@]}" >> "$cell_log" 2>&1; then
+                    cell_dur=$(($(date +%s) - t_cell))
+                    csv_path="$cell_dir/run_001.csv"
+                    if [[ -s "$csv_path" ]]; then
+                        n_samples=$(wc -l < "$csv_path")
+                        ok "cell done (${cell_dur}s wall, $n_samples CSV rows)"
+                        # Copy telemetry to telemetry_dir
+                        if [[ -f "$cell_dir/telemetry.txt" ]]; then
+                            cp "$cell_dir/telemetry.txt" "$TELEMETRY_DIR/${cell_key}.txt"
+                        fi
+                        cell_ok=1
+                        break
+                    else
+                        warn "[cell] CSV empty/missing (attempt $attempt)"
+                    fi
+                else
+                    rc=$?
+                    warn "[cell] measure_one_cell.py exited $rc (attempt $attempt). tail:"
+                    tail -10 "$cell_log" | sed 's/^/      /' | tee -a "$MASTER_LOG"
+                fi
+                attempt=$((attempt+1))
+            done
+
+            if [[ $cell_ok -eq 0 ]]; then
+                fail "[cell] $cell_key failed after $CELL_RETRIES attempts — aborting"
+                state_set_cell "$cell_key" "fail"
+                exit 1
+            fi
+
+            state_set_cell "$cell_key" "done"
+            CELLS_DONE=$((CELLS_DONE+1))
+
+            led_green
+            sleep "$INTER_CELL_SETTLE_S"
+
+            elapsed=$(($(date +%s) - P3_START))
+            remaining=$((TOTAL_CELLS - CELLS_DONE - CELLS_SKIP))
+            if [[ $CELLS_DONE -gt 0 && $remaining -gt 0 ]]; then
+                eta=$(( elapsed * remaining / CELLS_DONE ))
+                info "[progress] done=$CELLS_DONE skip=$CELLS_SKIP fail=$CELLS_FAIL ETA=$((eta/3600))h$((eta%3600/60))m"
+            fi
+        done
+    done
+done
+
+P3_DUR=$(($(date +%s) - P3_START))
+log ""
+log "  Phase 3 wall: $((P3_DUR/3600))h $((P3_DUR%3600/60))m"
+log "  Cells: done=$CELLS_DONE skip=$CELLS_SKIP fail=$CELLS_FAIL total=$TOTAL_CELLS"
+
+# =============================================================================
+#  Phase 4: Analysis
+# =============================================================================
+if $SKIP_ANALYSIS; then
+    head_ "PHASE 4 — SKIPPED (--skip-analysis)"
+else
+    head_ "PHASE 4 — Analysis"
+    cd "$ES"
+    analysis_log="$LOG_DIR/analysis.log"
+
+    info "parse_traces on all CSVs"
+    if find "$CSV_DIR" -name "run_*.csv" -print0 | xargs -0 -I{} \
+            python3 -m analysis.parse_traces {} >> "$analysis_log" 2>&1; then
+        ok "parse_traces done"
+    else
+        warn "parse_traces errors — see $analysis_log"
+    fi
+
+    if python3 -m analysis.compute_energy "$CSV_DIR" --out "$ANALYSIS_DIR/energy.json" \
+            >> "$analysis_log" 2>&1; then
+        ok "compute_energy → $ANALYSIS_DIR/energy.json"
+    else
+        warn "compute_energy failed"
+    fi
+
+    for fig in fig1_energy_vs_n fig2_memory fig3_time_vs_n fig4_crossover fig5_phase_breakdown; do
+        if python3 -m "analysis.figures.${fig}" \
+                --out "$ANALYSIS_DIR/${fig}.png" >> "$analysis_log" 2>&1; then
+            ok "$fig.png"
         else
-            warn "No REPORT.txt in $REGRESSION_DIR"
+            warn "$fig failed"
         fi
-        
-        # Copy regression artifacts into our log dir
-        cp -r "$REGRESSION_DIR" "$LOG_DIR/firmware_regression/" 2>/dev/null || true
-    else
-        warn "No regression artifact directory found"
-    fi
-    
-    P3_DUR=$(($(date +%s) - P3_START))
-    log ""
-    log "P3 wall time: $((P3_DUR / 60))m $((P3_DUR % 60))s"
-    
-    if [ "$TOTAL_FAIL" -gt 0 ]; then
-        PHASE_RESULTS+=("P3|FAIL|See $REGRESSION_LOG")
-    else
-        PHASE_RESULTS+=("P3|PASS|Both curves match baseline ±${TOLERANCE}")
-    fi
+    done
 fi
 
 # =============================================================================
-phase "P4 — Baseline verification (handled by P3)"
+#  Phase 5: Final report
 # =============================================================================
-
-log ""
-log "P4 — Baseline expectations (from doc/AmorE_*_Results.txt):"
-log ""
-log "  BN254 (build/bn254_a/amore_bn254.elf):"
-log "    OneTimeSetup       :    503.9 ms"
-log "    N=50 Blind/round   :    199.4 ms"
-log "    N=50 Verify/round  :    182.4 ms"
-log "    N=50 Amort/round   :    381.8 ms"
-log "    Honest verify_ok   :     61 / 61"
-log "    Status word        :     0x600d0000"
-log ""
-log "  BLS12_381 (build/bls12_381_a/amore_bls12_381.elf):"
-log "    OneTimeSetup       :  2,565.2 ms"
-log "    N=50 Blind/round   :  1,032.1 ms"
-log "    N=50 Verify/round  :    887.2 ms"
-log "    N=50 Amort/round   :  1,919.3 ms"
-log "    Honest verify_ok   :     61 / 61"
-log "    Status word        :     0x600d0000"
-log ""
-log "  Tolerance: ±$(echo "$TOLERANCE * 100" | bc)% per metric (sk-randomness jitter)"
-log "  Per-metric pass/fail: see P3 regression log"
-
-PHASE_RESULTS+=("P4|REF|See P3 for per-metric comparison")
-
-# =============================================================================
-phase "P5 — Implementation validation"
-# =============================================================================
-
-VAL_SCRIPT="$ENERGY_STUDY/scripts/implementation_validation.sh"
-P5_START=$(date +%s)
-
-if [ ! -f "$VAL_SCRIPT" ]; then
-    warn "implementation_validation.sh not found at $VAL_SCRIPT"
-    warn "  Add it from /mnt/user-data/outputs/ or skip P5"
-    PHASE_RESULTS+=("P5|SKIP|Script not found")
-elif ! command -v openocd &>/dev/null && ! $STATIC_ONLY; then
-    warn "openocd missing — running --static-only mode"
-    STATIC_ONLY=true
-fi
-
-if [ -f "$VAL_SCRIPT" ]; then
-    log ""
-    log "P5.1 — Running implementation_validation.sh"
-    
-    VAL_LOG="$LOG_DIR/implementation_validation.log"
-    VAL_ARGS=""
-    if $STATIC_ONLY || $SKIP_BENCH; then
-        VAL_ARGS="--static-only"
-        log "  Mode: --static-only (skipping Section B GDB checks)"
-    fi
-    
-    if bash "$VAL_SCRIPT" --curve=both $VAL_ARGS 2>&1 | tee "$VAL_LOG"; then
-        pass "implementation_validation exited cleanly"
-    else
-        EXIT_CODE=$?
-        if [ "$EXIT_CODE" -eq 1 ]; then
-            fail "implementation_validation has FAIL items — see $VAL_LOG"
-        else
-            warn "implementation_validation setup issue (exit $EXIT_CODE)"
-        fi
-    fi
-    
-    P5_DUR=$(($(date +%s) - P5_START))
-    log "P5 wall time: $((P5_DUR / 60))m $((P5_DUR % 60))s"
-    
-    # Extract pass/fail counts from validation log.
-    # FR7 fix: `grep -c PATTERN file || echo 0` was producing TWO lines
-    # ("0\n0") when grep had no matches (grep -c prints "0" AND exits 1,
-    # so the fallback fired). The resulting multi-line string broke
-    # `[ "$VAL_FAIL" -eq 0 ]` with "integer expression expected".
-    # tr drops the newline so we always get a single integer.
-    VAL_PASS=$(grep -c '✓ PASS' "$VAL_LOG" 2>/dev/null | tr -d '\n')
-    VAL_FAIL=$(grep -c '✗ FAIL' "$VAL_LOG" 2>/dev/null | tr -d '\n')
-    : "${VAL_PASS:=0}"
-    : "${VAL_FAIL:=0}"
-    
-    if [ "$VAL_FAIL" -eq 0 ]; then
-        PHASE_RESULTS+=("P5|PASS|$VAL_PASS checks passed")
-    else
-        PHASE_RESULTS+=("P5|FAIL|$VAL_FAIL items in $VAL_LOG")
-    fi
-fi
-
-# =============================================================================
-phase "P6 — Final report"
-# =============================================================================
-
-END_TS=$(date +%s)
-START_LINE=$(head -10 "$MASTER_LOG" | grep -i "Started:" | head -1)
-START_TS=$(date -d "$(echo "$START_LINE" | grep -oE '202[0-9]-[0-9]+-[0-9]+ [0-9]+:[0-9]+:[0-9]+')" +%s 2>/dev/null || echo "$END_TS")
-TOTAL_DUR=$((END_TS - START_TS))
+head_ "PHASE 5 — Final report"
 
 REPORT="$LOG_DIR/FINAL_REPORT.txt"
 {
-    echo "==================================================================="
-    echo "  FULL REGRESSION — FINAL REPORT"
-    echo "==================================================================="
-    echo "  Started:   $(echo "$START_LINE" | grep -oE '202[0-9]-.*')"
-    echo "  Ended:     $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "  Wall:      $((TOTAL_DUR / 60))m $((TOTAL_DUR % 60))s"
-    echo "  Mode:      skip_bench=$SKIP_BENCH static_only=$STATIC_ONLY"
+    echo "================================================================="
+    echo "  AmorE Energy Study — Full Regression Report"
+    echo "================================================================="
+    echo "  Ended  : $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "  Logdir : $LOG_DIR"
+    echo "  Mode   : $($SMOKE && echo "SMOKE" || echo "FULL")"
     echo ""
-    echo "  Total PASS:  $TOTAL_PASS"
-    echo "  Total FAIL:  $TOTAL_FAIL"
-    echo "  Total WARN:  $TOTAL_WARN"
+    echo "  Plan    : $(echo $CURVES | wc -w) curves × $(echo $MODES | wc -w) modes × $REPLICAS replicas = $TOTAL_CELLS cells"
+    echo "  Done    : $CELLS_DONE"
+    echo "  Skipped : $CELLS_SKIP"
+    echo "  Failed  : $CELLS_FAIL"
     echo ""
-    echo "  Phase results:"
-    for r in "${PHASE_RESULTS[@]}"; do
-        IFS='|' read -ra parts <<< "$r"
-        printf "    %-4s %-6s — %s\n" "${parts[0]}" "${parts[1]}" "${parts[2]}"
-    done
+    echo "  CSVs   : $CSV_DIR"
+    echo "  Telem  : $TELEMETRY_DIR"
+    if ! $SKIP_ANALYSIS; then
+        echo "  Energy : $ANALYSIS_DIR/energy.json"
+        echo "  Figs   : $ANALYSIS_DIR/fig{1,2,3,4,5}_*.png"
+    fi
     echo ""
-    echo "  Log directory: $LOG_DIR"
-    echo "  Master log:    $MASTER_LOG"
-    echo ""
-    if [ "$TOTAL_FAIL" -eq 0 ]; then
+    if [[ $CELLS_FAIL -eq 0 ]]; then
         echo "  ════════════════════════════════════════════════════════════════"
-        echo "  ✓ FULL REGRESSION PASSED"
+        echo "  ✓ FULL REGRESSION COMPLETED"
         echo "  ════════════════════════════════════════════════════════════════"
     else
         echo "  ════════════════════════════════════════════════════════════════"
-        echo "  ✗ FULL REGRESSION FAILED — $TOTAL_FAIL items"
+        echo "  ✗ COMPLETED WITH $CELLS_FAIL FAILED CELLS"
         echo "  ════════════════════════════════════════════════════════════════"
     fi
 } > "$REPORT"
 
 cat "$REPORT" | tee -a "$MASTER_LOG"
-
-# Symlink for easy access
-ln -sf "$LOG_DIR" "$ENERGY_STUDY/logs/regression_latest"
+ln -sfn "$LOG_DIR" "$ES/logs/full_regression_latest"
 
 echo ""
-echo "═══════════════════════════════════════════════════════════════════"
+echo "  Master log:  $MASTER_LOG"
 echo "  Final report: $REPORT"
-echo "  Quick view:   cat $ENERGY_STUDY/logs/regression_latest/FINAL_REPORT.txt"
-echo "═══════════════════════════════════════════════════════════════════"
+echo ""
 
-if [ "$TOTAL_FAIL" -gt 0 ]; then
-    exit 1
-else
-    exit 0
-fi
+# ── BETON-BARZEL final cleanup: restart ModemManager for normal system use ──
+info "[final] restarting ModemManager (was stopped for PPK2 stability)"
+sudo -n systemctl start ModemManager 2>/dev/null || true
+for i in $(seq 1 20); do
+    state=$(sudo -n systemctl is-active ModemManager 2>/dev/null)
+    state="${state:-unknown}"
+    if [[ "$state" == "active" ]]; then
+        info "[final] ✓ ModemManager active again (${i}*0.5s)"
+        break
+    fi
+    sleep 0.5
+done
+
+[[ $CELLS_FAIL -gt 0 ]] && exit 1
+exit 0

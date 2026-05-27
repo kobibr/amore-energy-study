@@ -31,13 +31,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# ─── IMPORT-SWITCH ────────────────────────────────────────────────────────────
-# Currently selected (mock):
-from measurement.backends import MockBackend as ActiveBackend
-# Real PPK2 (single-line change when hardware arrives, after PPK2Backend is
-# implemented — see measurement/backends.py PPK2Backend docstring):
-# from measurement.backends import PPK2Backend as ActiveBackend
+# ─── BACKEND SELECTION ─────────────────────────────────────────────────────────
+# Backend now selected via --backend flag (default: mock for safety, so that
+# sanity_check.sh / mini_regression.sh still run without hardware). Pass
+# --backend=ppk2 for real PPK2 + STM32 hardware measurements.
 # ──────────────────────────────────────────────────────────────────────────────
+from measurement.backends import MockBackend, PPK2Backend
 
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parent
@@ -290,6 +289,31 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, default=REPO_ROOT / "measurement" / "traces")
     p.add_argument("--smoke", action="store_true",
                    help="5-second single-replica smoke test")
+    p.add_argument(
+        "--backend",
+        choices=["mock", "ppk2"],
+        default="mock",
+        help="Measurement backend. 'mock' = synthetic CSVs via TCP "
+             "(default, used by sanity/mini_regression). 'ppk2' = real "
+             "Nordic PPK2 over USB serial; requires STM32 wired to "
+             "PPK2 VOUT/GND with IDD jumper removed, D0/D1/D2 to "
+             "PA0/PA1/PA4.",
+    )
+    p.add_argument(
+        "--ppk2-port",
+        default="/dev/ttyACM0",
+        help="Serial port for PPK2 (default /dev/ttyACM0). Only used "
+             "when --backend=ppk2.",
+    )
+    p.add_argument(
+        "--keep-dut-powered",
+        action="store_true",
+        help="Do NOT touch PPK2 source/DUT power state — assume an "
+             "external process is already holding VOUT ON. Used by "
+             "full_regression.sh which holds PPK2 for the entire "
+             "measurement campaign and resets STM32 between replicas "
+             "via NRST instead of power-cycling.",
+    )
     args = p.parse_args(argv)
 
     if args.smoke:
@@ -302,7 +326,16 @@ def main(argv: list[str] | None = None) -> int:
         replicas=args.replicas, duration_s=args.duration,
         gpio_source=args.gpio_source, out_dir=args.out,
     )
-    backend = ActiveBackend(repo_root=REPO_ROOT) if ActiveBackend.__name__ == "MockBackend" else ActiveBackend()
+    if args.backend == "ppk2":
+        backend = PPK2Backend(
+            serial_port=args.ppk2_port,
+            keep_dut_powered=args.keep_dut_powered,
+        )
+        kdp = " (keep_dut_powered=True)" if args.keep_dut_powered else ""
+        print(f"[run_cell] backend: PPK2Backend (port={args.ppk2_port}){kdp}")
+    else:
+        backend = MockBackend(repo_root=REPO_ROOT)
+        print(f"[run_cell] backend: MockBackend (synthetic)")
     return run_cell(cell, backend)
 
 
