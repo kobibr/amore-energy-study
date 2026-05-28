@@ -29,6 +29,10 @@ POST_NRST_BOOT_S = 3.0           # STM32 boot time after NRST
 SAMPLE_START_SETTLE_S = 0.5      # let measurement stabilize
 DRAIN_INTERVAL_S = 0.05          # PPK2 buffer drain cadence
 PPK2_SAMPLE_RATE_HZ = 100000
+# Only D0 (PA0=COMPUTE) and D1 (PA1=WAIT) carry signal; D2-D7 float
+# high (unconnected) so the raw byte reads 0xFF. Mask to the wires
+# we actually use for diversity validation. See doc/NRST_DISCOVERY.md.
+GPIO_TRIG_MASK = 0x03  # bits 0,1 = PA0,PA1 (Mode A uses both; Mode B uses bit0)
 
 
 def log(msg):
@@ -87,6 +91,8 @@ def flash_stm32(rpi_user, rpi_host, elf_path, voltage_mv=3300):
         return False
 
     # 3. flash via openocd (PPK2 keeps DUT powered)
+    #    Release any NRST holder first — openocd needs GPIO 18 as srst.
+    nrst_release(rpi_user, rpi_host)
     log(f"[flash] openocd program {elf_basename}")
     r = subprocess.run(["ssh", f"{rpi_user}@{rpi_host}",
                        "sudo openocd -f /home/pi/rpi_swd.cfg "
@@ -140,29 +146,52 @@ def flash_stm32(rpi_user, rpi_host, elf_path, voltage_mv=3300):
     return True
 
 
-def nrst_pulse(rpi_user, rpi_host):
-    """Pulse NRST low for ~300ms via RPi GPIO 18 using libgpiod gpioset.
-    
-    This resets the STM32 without going through SWD (which would break
-    PPK2 D-channels). The STM32 then boots its current flash contents.
-    
-    Implementation: 'gpioset -c gpiochip0 18=0' drives LOW; we run it
-    under 'timeout 0.3' so gpioset exits after 300ms — when gpioset
-    exits, the GPIO line returns to input (high-Z), and the STM32's
-    internal NRST pull-up brings NRST back HIGH → STM32 runs.
-    
-    timeout(1) returns exit 124 when killing the timed-out process,
-    which is the normal/expected case here.
+def nrst_release(rpi_user, rpi_host):
+    """Kill any background gpioset holding NRST, freeing GPIO 18.
+
+    Must be called before any openocd command (which needs GPIO 18 as
+    srst) and before a fresh nrst_pulse.
     """
-    log("[nrst] pulsing STM32 NRST via RPi GPIO 18 (gpiochip0)")
-    cmd = "sudo timeout 0.3 gpioset --consumer nrst-pulse -c gpiochip0 18=0"
-    r = subprocess.run(["ssh", f"{rpi_user}@{rpi_host}", cmd],
-                       capture_output=True, text=True, timeout=10)
-    # timeout exit 124 = normal completion of LOW pulse
+    subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo pkill -f 'gpioset.*gpiochip0 18' 2>/dev/null; true"],
+        capture_output=True, text=True, timeout=10)
+    time.sleep(0.3)
+
+
+def nrst_pulse(rpi_user, rpi_host):
+    """Reset STM32 via NRST (GPIO 18), then HOLD NRST HIGH actively.
+
+    CRITICAL (Day 5 root-cause fix): the previous implementation let the
+    line FLOAT after the pulse. The STM32 internal NRST pull-up (~40k) is
+    too weak against noise on the floating RPi GPIO, so NRST kept spuriously
+    re-triggering every ~2.7ms -> permanent reset loop. Firmware never got
+    past CURVE_INIT (mis-diagnosed for days as a RELIC hang).
+
+    Fix: after the LOW pulse, a BACKGROUND gpioset actively drives NRST
+    HIGH and stays alive (setsid, survives SSH). Holds NRST high stably
+    with zero SWD activity -> PPK2 D-channels preserved AND STM32 runs
+    without reset-looping. Killed by nrst_release() before next pulse or
+    any openocd access. See doc/NRST_DISCOVERY.md.
+    """
+    log("[nrst] resetting STM32 via GPIO 18, then holding NRST HIGH")
+    nrst_release(rpi_user, rpi_host)
+    r = subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo timeout 0.1 gpioset -c gpiochip0 18=0"],
+        capture_output=True, text=True, timeout=10)
     if r.returncode not in (0, 124):
-        log(f"[nrst] FAILED: rc={r.returncode} stderr={r.stderr}")
+        log(f"[nrst] LOW pulse FAILED: rc={r.returncode} stderr={r.stderr}")
         return False
-    log("[nrst] ✓ pulse complete (300ms LOW, then released)")
+    r = subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo setsid bash -c 'gpioset -c gpiochip0 18=1' "
+         "</dev/null >/dev/null 2>&1 & echo held"],
+        capture_output=True, text=True, timeout=10)
+    if "held" not in (r.stdout + r.stderr):
+        log(f"[nrst] HOLD-HIGH FAILED: rc={r.returncode} stderr={r.stderr}")
+        return False
+    log("[nrst] OK pulsed LOW then HOLDING HIGH (no float, no reset-loop)")
     return True
 
 
@@ -208,7 +237,7 @@ def measure_replica(ppk2, csv_out, duration_s, replica_num):
 
     csv_fp = csv_out.open("w", encoding="utf-8", newline="")
     writer = csv.writer(csv_fp)
-    writer.writerow(["timestamp_us", "current_uA", "voltage_V", "gpio_byte"])
+    writer.writerow(["timestamp_us", "current_uA", "voltage_V", "gpio_byte", "gpio_masked"])
 
     samples_count = 0
     gpio_seen = collections.Counter()
@@ -224,9 +253,10 @@ def measure_replica(ppk2, csv_out, duration_s, replica_num):
                 if isinstance(result, tuple) and len(result) >= 2:
                     currents, digitals = result[0], result[1]
                     for current_uA, gpio in zip(currents, digitals):
-                        writer.writerow([t_us, f"{current_uA:.2f}", "3.30", gpio])
+                        gpio_m = gpio & GPIO_TRIG_MASK
+                        writer.writerow([t_us, f"{current_uA:.2f}", "3.30", gpio, gpio_m])
                         t_us += period_us
-                        gpio_seen[gpio] += 1
+                        gpio_seen[gpio_m] += 1
                         samples_count += 1
             time.sleep(DRAIN_INTERVAL_S)
             if time.time() - last_log > 30:
@@ -351,6 +381,8 @@ def main():
     log("═══ Phase 5: Cleanup ═══")
     ppk2.toggle_DUT_power("OFF")
     log("[ppk2] DUT power OFF")
+    nrst_release(args.rpi_user, args.rpi_host)
+    log("[nrst] released GPIO 18 holder")
 
     # Summary
     summary_path = args.out_dir / "summary.json"
