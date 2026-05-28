@@ -4,6 +4,19 @@
 
 ### C1. PPK2 NOT calibrated against a known resistor
 
+**[SUPERSEDED 2026-05-28]** The -55% deviation was an ARTIFACT of
+calibrate.py mixing DUT-ON and DUT-OFF samples (bimodal distribution:
+71% at ~9mA when off, 18% at ~100mA when on). A clean re-run (5s settle,
+discard first 1s, median statistic) gives -5.0% deviation through the same
+33Ω resistor — the PPK2 is accurate. See
+measurement/calibration-logs/calibration_20260528_clean_R33.txt.
+Absolute energy claims ARE permissible within ~5%. Original note below
+kept for history.
+
+---
+
+### C1 (ORIGINAL). PPK2 NOT calibrated against a known resistor
+
 **Status:** The May 20, 2026 calibration attempt failed (expected 100 mA
 through a 33Ω resistor, measured 45 mA; -55% deviation). This means
 **absolute PPK2 current readings cannot be trusted.**

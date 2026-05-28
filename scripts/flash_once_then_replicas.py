@@ -226,6 +226,27 @@ def sample_digital(ppk2, duration_s, label):
     return dict(seen)
 
 
+def decode_logic_bytes(buf):
+    """Extract ONLY the logic/digital byte from each 4-byte PPK2 word.
+
+    ppk2.get_samples() returns correct CURRENT (its calibration + spike
+    filter are stateful and order-dependent) but a BROKEN digital byte
+    (constant 0xFF, due to its remainder/sequence mis-alignment on fw 5390).
+
+    So we take current from get_samples() and the logic byte from here.
+    Both iterate the same 4-byte words in the same order, so the i-th
+    current pairs with the i-th logic byte. See doc/NRST_DISCOVERY.md.
+
+    Logic byte = bits 24-31 of each little-endian 32-bit word.
+    """
+    logics = []
+    n = len(buf) - (len(buf) % 4)
+    for i in range(0, n, 4):
+        word = int.from_bytes(buf[i:i+4], byteorder="little", signed=False)
+        logics.append((word >> 24) & 0xFF)
+    return logics
+
+
 def measure_replica(ppk2, csv_out, duration_s, replica_num):
     """Run one replica: NRST pulse done before this. Sample to CSV.
     
@@ -249,15 +270,15 @@ def measure_replica(ppk2, csv_out, duration_s, replica_num):
         while time.time() - t0 < duration_s:
             raw = ppk2.get_data()
             if raw:
-                result = ppk2.get_samples(raw)
-                if isinstance(result, tuple) and len(result) >= 2:
-                    currents, digitals = result[0], result[1]
-                    for current_uA, gpio in zip(currents, digitals):
-                        gpio_m = gpio & GPIO_TRIG_MASK
-                        writer.writerow([t_us, f"{current_uA:.2f}", "3.30", gpio, gpio_m])
-                        t_us += period_us
-                        gpio_seen[gpio_m] += 1
-                        samples_count += 1
+                result = ppk2.get_samples(raw)   # correct current
+                currents = result[0] if isinstance(result, tuple) else []
+                logics = decode_logic_bytes(raw)  # correct digital
+                for current_uA, gpio in zip(currents, logics):
+                    gpio_m = gpio & GPIO_TRIG_MASK
+                    writer.writerow([t_us, f"{current_uA:.2f}", "3.30", gpio, gpio_m])
+                    t_us += period_us
+                    gpio_seen[gpio_m] += 1
+                    samples_count += 1
             time.sleep(DRAIN_INTERVAL_S)
             if time.time() - last_log > 30:
                 log(f"[replica {replica_num}] elapsed {time.time()-t0:.0f}s, {samples_count} samples")
