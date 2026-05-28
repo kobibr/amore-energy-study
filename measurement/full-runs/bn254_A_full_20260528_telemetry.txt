@@ -1,0 +1,9 @@
+=== STM32 TELEMETRY (Mode A) ===
+status   = 0x600d0000
+wall_ms  = 4604288
+total_rounds_sent = 61
+total_verify_ok   = 61
+[N=1]  blind_total=35947287  verify_total=31784566  amort=67731853
+[N=10] blind_total=374538754  verify_total=333491905  amort=70803065
+[N=50] blind_total=1888638795  verify_total=1668399747  amort=71140770
+=== END ===
