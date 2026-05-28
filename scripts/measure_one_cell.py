@@ -158,9 +158,7 @@ def probe_ppk2_digital(ppk2, label: str, duration_s: float = 1.0) -> dict:
         while time.time() - t0 < duration_s:
             raw = ppk2.get_data()
             if raw:
-                res = ppk2.get_samples(raw)
-                if isinstance(res, tuple) and len(res) > 1:
-                    seen.update(res[1])
+                seen.update(decode_logic_bytes(raw))
             time.sleep(0.05)
         ppk2.stop_measuring()
         total = sum(seen.values()) or 1
@@ -321,6 +319,58 @@ def discover_ppk2_port(hint: str | None) -> str:
         if "PPK" in desc or "Nordic" in desc:
             return p.device
     return ""
+
+
+def decode_logic_bytes(buf):
+    """Extract ONLY the logic byte from each 4-byte PPK2 word.
+
+    ppk2.get_samples() returns correct CURRENT but a BROKEN logic byte
+    (constant 0xFF) due to remainder mis-alignment on PPK2 fw 5390.
+    We read the logic byte (bits 24-31) directly from each little-endian
+    32-bit word. Pairs i-th current (from get_samples) with i-th logic.
+    Proven on Day 5; see doc/NRST_DISCOVERY.md.
+    """
+    n = len(buf) - (len(buf) % 4)
+    return [(int.from_bytes(buf[i:i+4], "little") >> 24) & 0xFF
+            for i in range(0, n, 4)]
+
+
+def nrst_release(rpi_user, rpi_host):
+    """Kill any background gpioset holding NRST (GPIO 18). Call before any
+    openocd (needs GPIO18 as srst) and before a fresh nrst_pulse_hold."""
+    subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo pkill -f 'gpioset.*gpiochip0 18' 2>/dev/null; true"],
+        capture_output=True, text=True, timeout=10)
+    time.sleep(0.3)
+
+
+def nrst_pulse_hold(rpi_user, rpi_host):
+    """Reset STM32 via NRST then HOLD it HIGH (Day 5 root-cause fix).
+
+    The old 'gpioset timeout' let NRST float -> STM32 reset-looped every
+    ~2.7ms, never finishing. Here we pulse LOW then start a setsid-backed
+    gpioset that drives NRST HIGH and survives the SSH session. No SWD, so
+    PPK2 D-channels are preserved. Kill with nrst_release() before openocd.
+    """
+    nrst_release(rpi_user, rpi_host)
+    r = subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo timeout 0.1 gpioset -c gpiochip0 18=0"],
+        capture_output=True, text=True, timeout=10)
+    if r.returncode not in (0, 124):
+        log(f"[nrst] LOW pulse failed: rc={r.returncode} {r.stderr}")
+        return False
+    r = subprocess.run(
+        ["ssh", f"{rpi_user}@{rpi_host}",
+         "sudo setsid bash -c 'gpioset -c gpiochip0 18=1' "
+         "</dev/null >/dev/null 2>&1 & echo held"],
+        capture_output=True, text=True, timeout=10)
+    if "held" not in (r.stdout + r.stderr):
+        log(f"[nrst] hold-high failed: rc={r.returncode} {r.stderr}")
+        return False
+    log("[nrst] pulsed LOW + HOLDING HIGH (no float, no reset-loop)")
+    return True
 
 
 def flash_via_rpi(
@@ -642,6 +692,20 @@ def main(argv: list[str] | None = None) -> int:
         odr_t4 = probe_stm32_odr()
         log(f"[ppk2-probe:T4-odr] STM32 ODR = 0x{odr_t4:08x}" if odr_t4 is not None else "[ppk2-probe:T4-odr] read failed")
 
+        # 4c. CRITICAL (Day 5 root-cause fix): reset STM32 via NRST and HOLD
+        # NRST HIGH. The previous architecture relied on openocd 'reset run'
+        # which (a) leaves NRST able to float -> STM32 reset-loops every
+        # ~2.7ms and never finishes, and (b) uses SWD which breaks PPK2
+        # D-channels. NRST pulse+hold-high gives a clean reset, holds the
+        # line stable with NO SWD, so the firmware runs to completion AND the
+        # D-channels keep working. Proven in smoke test. doc/NRST_DISCOVERY.md
+        log("[nrst] pulse + hold-high to start firmware cleanly")
+        if not nrst_pulse_hold(args.rpi_user, args.rpi_host):
+            err_msg = "NRST pulse+hold failed"
+            return 1
+        time.sleep(BOOT_SETTLE_S)
+        probe_ppk2_digital(ppk2, "T4b-after-nrst-hold", 1.0)
+
         # 5. (Mode A only) Start RPi server.py
         #    Curve-aware: BN254 uses server_bn254.py, BLS12_381 uses server.py
         #    (default BLS). The two scripts share the same UART protocol but
@@ -749,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
                 if raw:
                     res = ppk2.get_samples(raw)
                     s = res[0] if isinstance(res, tuple) else res
-                    digital = res[1] if isinstance(res, tuple) and len(res) > 1 else None
+                    digital = decode_logic_bytes(raw)
                     write_batch(s, digital)
                 break
 
@@ -758,7 +822,7 @@ def main(argv: list[str] | None = None) -> int:
             if raw:
                 res = ppk2.get_samples(raw)
                 s = res[0] if isinstance(res, tuple) else res
-                digital = res[1] if isinstance(res, tuple) and len(res) > 1 else None
+                digital = decode_logic_bytes(raw)  # correct logic (get_samples digital is broken)
                 write_batch(s, digital)
 
             # Progress log every 30 seconds + STM32 ODR snapshot
@@ -801,7 +865,9 @@ def main(argv: list[str] | None = None) -> int:
                     server_proc.kill()
             server_proc = None
 
-        # 10. GDB telemetry — STM32 still powered, so SWD works
+        # 10. GDB telemetry — STM32 still powered, so SWD works.
+        # Release the NRST holder first: GDB/openocd needs GPIO18 as srst.
+        nrst_release(args.rpi_user, args.rpi_host)
         log("[gdb] reading STM32 telemetry")
         gdb_ok = gdb_dump(args.elf, args.rpi_user, args.rpi_host, args.mode, telem_path)
         if gdb_ok:

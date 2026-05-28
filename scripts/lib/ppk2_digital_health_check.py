@@ -36,16 +36,24 @@ def check_health():
         while time.time() - t0 < 5:
             raw = ppk2.get_data()
             if raw:
-                r = ppk2.get_samples(raw)
-                if isinstance(r, tuple) and len(r) > 1:
-                    seen.update(r[1])
+                # Decode logic byte directly from raw 4-byte words.
+                # get_samples() returns a broken (constant 0xFF) digital byte
+                # on PPK2 fw 5390; the raw decode is correct. See Day 5.
+                n = len(raw) - (len(raw) % 4)
+                for i in range(0, n, 4):
+                    seen[(int.from_bytes(raw[i:i+4], "little") >> 24) & 0xFF] += 1
             time.sleep(0.05)
         ppk2.stop_measuring()
         ppk2.toggle_DUT_power("OFF")
         ppk2.ser.close()
         unique = sorted(seen.keys())
-        # Healthy = saw at least 2 distinct values OR not stuck at 0
-        healthy = len(unique) >= 2 or (len(unique) == 1 and unique[0] != 0)
+        # At THIS stage no firmware is toggling PA0 yet, so we cannot require
+        # signal diversity. We only require that the raw stream decodes and is
+        # NOT permanently stuck at 0 (0 = D-channels physically dead/no VCC).
+        # Real toggle validation happens per-cell after NRST starts firmware.
+        total = sum(seen.values())
+        stuck_zero = (len(unique) == 1 and unique[0] == 0)
+        healthy = (total > 1000) and (not stuck_zero)
         return healthy, unique
     except Exception as e:
         print(f"  ✗ check failed: {e}", flush=True)
