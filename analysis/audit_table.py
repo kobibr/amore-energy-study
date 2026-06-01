@@ -13,7 +13,6 @@ Sources scanned:
   - measurement/voltage-sensitivity/voltage_*.txt
   - measurement/traces/*/variance_report.txt
   - measurement/calibration-logs/calibration_*.txt
-  - measurement/stop-validation/stop_*.txt
   - firmware/amore-fw/logs/stm_report_*.txt
 
 Computed claims (no measurement file, derived analytically):
@@ -197,51 +196,6 @@ def parse_stm_report(path: Path) -> list[AuditEntry]:
     return entries
 
 
-def parse_stop_validation(path: Path) -> list[AuditEntry]:
-    """Pull stop-mode current from stop_validation summary."""
-    if not path.exists():
-        return []
-    text = path.read_text()
-    entries: list[AuditEntry] = []
-    src = path.name
-
-    m = re.search(r"Stop window:.*?mean:\s*([\d.]+)\s*\u00b5A", text, re.DOTALL)
-    if m:
-        uA = float(m.group(1))
-        # Bug M4 fix: expected IDD_STOP is ~0.5 µA (datasheet typical).
-        # The previous 100 µA threshold accepts 80 µA (160× expected) as
-        # "measured" — that means firmware wasn't really in Stop mode.
-        # Tightened to a 3-tier:
-        #   < 5 µA   → measured (within 10× of typical)
-        #   < 50 µA  → measured but borderline (note the deviation)
-        #   ≥ 50 µA  → pending; almost certainly firmware not in Stop mode
-        if uA < 5:
-            status = "measured"
-            notes = f"stop-mode firmware flashed; within 10× of 0.5 µA typical"
-        elif uA < 50:
-            status = "measured"
-            notes = (
-                f"reported {uA:.1f} µA — borderline (>10× of 0.5 µA typical, "
-                "but plausibly Stop mode with peripheral leak)"
-            )
-        else:
-            status = "pending"
-            notes = (
-                f"reported {uA:.1f} µA — too high for stop-mode (>100× typical); "
-                "needs stop_test.elf flashed"
-            )
-        entries.append(AuditEntry(
-            category="electrical",
-            claim="IDD_STOP (Stop-mode current)",
-            value=f"{uA:.3f}",
-            unit="µA",
-            source=src,
-            status=status,
-            notes=notes,
-        ))
-    return entries
-
-
 def parse_calibration(path: Path) -> list[AuditEntry]:
     """Record presence of a calibration log."""
     if not path.exists():
@@ -335,9 +289,6 @@ def collect_all(root: Path) -> list[AuditEntry]:
     for f in sorted((root / "measurement/traces").glob("**/variance_report.txt")):
         entries.extend(parse_variance_report(f))
 
-    # Stop validation
-    for f in sorted((root / "measurement/stop-validation").glob("stop_*.txt")):
-        entries.extend(parse_stop_validation(f))
 
     # Calibration
     for f in sorted((root / "measurement/calibration-logs").glob("calibration_*.txt")):

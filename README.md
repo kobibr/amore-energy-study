@@ -1,92 +1,77 @@
 # AmorE Energy Study
 
-Energy measurement of the AmorE protocol (Amortized Remote Pairing
-Evaluation) on STM32F407 + Raspberry Pi 3B, with PPK2 current sensing.
+Energy measurement of the AmorE protocol (amortized remote pairing
+evaluation) on a Cortex-M4 STM32F407 client, compared 1:1 against a
+single RELIC local pairing, in BN254 and BLS12-381.
 
-## Status
+## Headline result
 
-**PPK2 hardware in hand; production measurement sweep underway.**
+    Curve       AmorE energy/round   1 x RELIC pairing   Ratio   Result
+    ---------   ------------------   -----------------   -----   ----------------------
+    BN254          160.16 mJ            85.27 mJ          1.88x   AmorE costs 1.88x more
+    BLS12-381      354.04 mJ           180.42 mJ          1.96x   AmorE costs 1.96x more
 
-## Quickstart
+Compute-only, phase-aware energy on STM32F407 at 168 MHz, pure-C build
+(AmorE -O3, RELIC ARITH=easy -O3, no assembly). Current is measured
+during the compute phase (GPIO bit0), not the full-trace median.
+Comparison is 1:1 per the AmorE paper (one delegation vs one local
+pairing). On a Cortex-M4 without assembly, AmorE costs ~1.9x the energy
+and ~1.7-1.9x the time of a local pairing; its value is memory
+footprint, pairing-library avoidance, and verifiable outsourcing - not
+speed or energy. All 24 measurement cells terminated with
+`status = 0x600D0000`. Full results in `docs/FINAL_RESULTS_20260531.md`.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+## Hardware setup
 
-# Run all tests
-pytest
-
-# Smoke test (5 sec)
-python3 scripts/run_cell.py --smoke --out /tmp/smoke
-
-# Generate all 4 figures (uses synthetic data)
-for fig in plot_energy_per_round plot_phase_breakdown plot_mode_comparison plot_crossover; do
-    python3 -m "analysis.${fig}"
-done
-
-# End-to-end integration test (~30s)
-bash scripts/integration_smoke.sh
-```
+    Client    STM32F407G-DISC1 (168 MHz, Cortex-M4 + FPU)
+    Server    Raspberry Pi 3B (py_ecc 8.0.0)
+    UART      STM32 USART2 (PA2/PA3) to RPi GPIO 14/15, 921600 baud
+    SWD       RPi GPIO 25/24 to STM32 SWCLK/SWDIO
+    NRST      RPi GPIO 18 to STM32 NRST (held high, see
+              firmware/amore-fw/doc/NRST_DISCOVERY.md)
+    Power     Nordic Power Profiler Kit II (PPK2), source-meter at
+              3.300 V, R33 calibration -5%
 
 ## Repository layout
 
-```
-amore-energy-study/
-├── analysis/                       Python analysis pipeline
-│   ├── parse_traces.py             CSV → list[Phase]
-│   ├── compute_energy.py           Phase → energy_J
-│   ├── variance_summary.py         replicas → mean ± stderr
-│   ├── comm_energy_fit.py          payload_bytes → energy linear fit
-│   ├── sleep_model.py              BatchModel + crossover
-│   ├── plot_*.py                   4 figures (Fig 1–4)
-│   ├── fixtures/synthetic_cells.py CSV generator from baseline data
-│   └── tests/                      17 unit tests
-├── measurement/
-│   ├── ppk2-control/               Mock PPK2 server + client + 171 tests
-│   └── traces/                     CSV traces (synthetic now, real later)
-├── firmware/amore-fw/              submodule → kobibr/amore-bn254-cortex-m4
-│                                   feature/energy-instrumentation branch
-├── scripts/
-│   ├── run_cell.py                 Measurement orchestrator
-│   ├── integration_smoke.sh        End-to-end test
-│   └── build_matrix.sh             Compile every firmware variant
-├── docs/
-│   ├── methodology.md              How the experiments work
-│   └── comm_anchors.md             UART energy anchor points
-├── figures/                        Generated PNGs (fig1–fig4)
-└── internal/
-    ├── diary.md                    Day-by-day log
-    └── iter*.csv                   Earlier dev traces
-```
+    amore-energy-study/
+    +-- analysis/             Python analysis pipeline (reads logs/ only)
+    |   +-- compute_energy.py           phase-aware energy from logs/
+    +-- docs/
+    |   +-- FINAL_RESULTS_20260531.md   results
+    |   +-- methodology.md              how the measurements work
+    |   +-- known_caveats.md            measurement uncertainty bounds
+    |   +-- audit_table.md              per-claim source mapping
+    +-- firmware/amore-fw/    submodule, github.com/kobibr/amore-bn254-cortex-m4
+    +-- scripts/
+    |   +-- full_regression.sh          orchestrator entry point
+    |   +-- measure_one_cell.py         per-cell PPK2 + SWD owner
+    +-- measurement/
+    |   +-- calibration-logs/           R33 calibration evidence
+    +-- logs/                 per-run captures (CSVs gitignored)
 
-## When PPK2 arrives
+## Reproducing the measurement
 
-One-line change: `scripts/run_cell.py` (search for `# IMPORT-SWITCH`).
-Everything else — analysis, plots, tests — is rate-agnostic and runs
-unchanged on real PPK2 CSVs.
+PPK2 connected to host USB, STM32 wired to RPi via SWD + UART per
+above, RPi reachable as `pi@192.168.1.69` with passwordless SSH:
 
-## Tags
+    RPI_HOST=192.168.1.69 bash scripts/full_regression.sh \
+        --replicas=6 --curves=BN254,BLS12_381 --modes=A,B --honest-rounds=61
 
-The repo carries milestone tags marking incremental progress:
+Then compute energy from the captured logs:
 
-- scaffold — Mock PPK2 stack and project skeleton (171 tests)
-- firmware-baseline — firmware submodule integration (STM32CubeF4)
-- firmware-triggers — GPIO trigger instrumentation in firmware
-- firmware-lowpower — Stop-mode and wake-up burst firmware variants
-- framework-complete — orchestrator + analysis pipeline + figures + docs
+    python3 analysis/compute_energy.py logs/full_regression_<timestamp>
 
+Each cell writes to `logs/full_regression_<timestamp>/measurements/
+<cell>/run_001.csv` and `telemetry.txt`. The `state.json` checkpoint
+allows `--resume` after interruption.
 
+## Related repositories
 
-## A note on tags
+    Firmware    github.com/kobibr/amore-bn254-cortex-m4    HEAD 42fdefd
+                AmorE protocol implementation and RELIC bench harnesses
+                for both BN254 and BLS12-381.
 
+## License
 
-## Status checks
-
-| Item | Count | Status |
-|------|-------|--------|
-| Unit tests passing | 232 | ✓ |
-| Firmware ELF variants | 5 | ✓ |
-| Synthetic cells | 10 × 3 replicas | ✓ |
-| Figures generated | 4 PNGs | ✓ |
-| Integration smoke runtime | <30s | ✓ |
+See LICENSE.

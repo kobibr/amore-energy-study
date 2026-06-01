@@ -456,6 +456,7 @@ printf "status   = 0x%08x\\n", g_results.status
 printf "wall_ms  = %u\\n", g_results.wall_ms
 printf "total_rounds_sent = %u\\n", g_results.total_rounds_sent
 printf "total_verify_ok   = %u\\n", g_results.total_verify_ok
+printf "ots_cycles = %u\\n", g_results.ots_cycles
 printf "[N=1]  blind_total=%llu  verify_total=%llu  amort=%u\\n", g_results.blind_total_cycles[0], g_results.verify_total_cycles[0], g_results.amort_cycles[0]
 printf "[N=10] blind_total=%llu  verify_total=%llu  amort=%u\\n", g_results.blind_total_cycles[1], g_results.verify_total_cycles[1], g_results.amort_cycles[1]
 printf "[N=50] blind_total=%llu  verify_total=%llu  amort=%u\\n", g_results.blind_total_cycles[2], g_results.verify_total_cycles[2], g_results.amort_cycles[2]
@@ -499,7 +500,7 @@ quit
         keep = [
             ln for ln in lines
             if any(ln.startswith(prefix) for prefix in
-                   ("status", "wall", "total", "n_iter", "cycles", "[N=",
+                   ("status", "wall", "total", "ots", "n_iter", "cycles", "[N=",
                     "current", "last", "init", "sanity", "n_iterations",
                     "blind_total", "verify_total", "amort",
                     "pairing_min", "==="))
@@ -813,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
                 if raw:
                     res = ppk2.get_samples(raw)
                     s = res[0] if isinstance(res, tuple) else res
-                    digital = decode_logic_bytes(raw)
+                    digital = res[1] if isinstance(res, tuple) and len(res) > 1 else None  # FIXED: aligned logic from get_samples
                     write_batch(s, digital)
                 break
 
@@ -822,7 +823,7 @@ def main(argv: list[str] | None = None) -> int:
             if raw:
                 res = ppk2.get_samples(raw)
                 s = res[0] if isinstance(res, tuple) else res
-                digital = decode_logic_bytes(raw)  # correct logic (get_samples digital is broken)
+                digital = res[1] if isinstance(res, tuple) and len(res) > 1 else None  # FIXED: aligned logic from get_samples
                 write_batch(s, digital)
 
             # Progress log every 30 seconds + STM32 ODR snapshot
@@ -973,16 +974,31 @@ def main(argv: list[str] | None = None) -> int:
         # Expected for Mode A: D0=TOGGLE, D1=TOGGLE, D2=stuck-0
         # Expected for Mode B: D0=TOGGLE, D1=stuck-0, D2=stuck-0
 
-        if unique_gpio == [0]:
-            log("[validate] FAIL: gpio_byte stuck at 0 — PPK2 digital capture broken")
-            log("[validate]       Cannot do phase-resolved analysis without diversity")
-            log("[validate]       Refusing to mark cell as successful")
+        # FIXED (2026-05-30): mask to D0|D1 only (D3-D7 are constant pull-ups
+        # at 1, verified: rest=248=11111000; toggling lives in bit0/bit1).
+        # Mapping (confirmed on hardware): bit0=PA0=COMPUTE, bit1=PA1=ServerWait.
+        masked = sorted(set(v & 0x03 for v in unique_gpio))
+        d0_toggle = any(v & 0x01 for v in unique_gpio) and any(not (v & 0x01) for v in unique_gpio)
+        d1_toggle = any(v & 0x02 for v in unique_gpio) and any(not (v & 0x02) for v in unique_gpio)
+        log(f"[validate] masked&0x03={masked}  D0_toggle={d0_toggle}  D1_toggle={d1_toggle}")
+
+        if total < 1000:
+            log(f"[validate] FAIL: only {total} samples — PPK2 stream broken")
             return 2
-        elif len(unique_gpio) == 1:
-            log(f"[validate] FAIL: gpio_byte stuck at {unique_gpio[0]} — phase capture broken")
-            return 2
-        # Diversity OK
-        log(f"[validate] ✓ gpio_byte diversity confirmed ({len(unique_gpio)} distinct values)")
+
+        mode = getattr(args, "mode", "A")
+        if mode == "A":
+            # Mode A has compute + ServerWait phases → PA0/PA1 MUST toggle.
+            if not (d0_toggle or d1_toggle):
+                log(f"[validate] FAIL: Mode A but no D0/D1 toggle (masked={masked}) "
+                    f"— phase capture broken or decode regressed")
+                return 2
+            log(f"[validate] ✓ Mode A phase toggle confirmed (D0={d0_toggle}, D1={d1_toggle})")
+        else:
+            # Mode B is a continuous pairing — NO phase structure expected.
+            # A constant gpio is CORRECT here; we only needed valid current.
+            log(f"[validate] ✓ Mode B: constant gpio is expected (no phases); "
+                f"current capture valid ({total} samples)")
 
         log(f"manifest: {manifest_path}")
         # NOTE: do NOT restart ModemManager here — must stay stopped

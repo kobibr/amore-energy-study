@@ -28,7 +28,7 @@ def parse_telem(path):
         if m: d["pairing_min"] = int(m.group(1))
     return d
 
-def csv_median_mA(csv_path, max_rows=None):
+def csv_median_mA(csv_path, max_rows=None):  # full-read by default
     """Median current in mA, filtered to <200mA (drop range-switch spikes)."""
     vals = []
     if not os.path.exists(csv_path): return None
@@ -55,7 +55,7 @@ for LD in LOG_DIRS:
         curve, mode, rep = m.group(1), m.group(2), int(m.group(3))
         telem = parse_telem(tf)
         csv_path = f"{LD}/measurements/{cell}/run_001.csv"
-        median = csv_median_mA(csv_path, max_rows=500000)  # sample first 500k rows for speed
+        median = csv_median_mA(csv_path, max_rows=None)  # FIXED: full CSV (500k truncation biased current)
         cells[(curve.upper().replace("BLS12_381","BLS"), mode)].append({
             "rep": rep, "telem": telem, "median_mA": median
         })

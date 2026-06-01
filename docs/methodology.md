@@ -1,3 +1,5 @@
+<!-- INTERNAL ONLY - DO NOT COMMIT TO PUBLIC GIT REPO -->
+
 # AmorE Energy Study — Methodology
 
 ## Overview
@@ -17,6 +19,7 @@ STM32F407 (client)
    ▼
 PPK2 (Nordic Power Profiler Kit II)
    │ samples I(t), V(t), gpio_byte at 100 kHz
+   │ Pre-PPK2 phase: Mock PPK2 in software (25 kHz)
    ▼
 4-column CSV : timestamp_us, current_uA, voltage_V, gpio_byte
    │
@@ -25,40 +28,33 @@ Analysis pipeline:
   parse_traces.py     → list[Phase]   (one record per gpio_byte run)
   compute_energy.py   → TraceEnergy   (E = I × V × t, aggregated by gpio_byte)
   variance_summary.py → CellSummary   (mean ± stderr across replicas)
-  sleep_model.py      → BatchModel    (analytic E(N), crossover)
 ```
 
-## Channel assignment
+## Channel assignment (per PIN_DIAGRAM.md)
 
-| Pin (STM32) | Pi BCM | gpio_byte bit | Phase             | Active current |
-|-------------|--------|---------------|-------------------|----------------|
-| PA0         | 17     | bit 0         | Setup / Verify    | ~85 mA         |
-| PA1         | 27     | bit 1         | ServerWait        | ~55 mA         |
-| PA4         | 22     | bit 2         | Mode-C UART burst | ~88 mA         |
-| (none)      | —      | —             | Idle              | ~50 mA         |
-
-Pin choice rationale: PA0, PA1, PA4 are general-purpose I/O pins not
-allocated to peripherals on the STM32F407G-DISC1 board. PA2 and PA3 are
-reserved for USART2 (TX/RX to the Pi) and cannot be repurposed for
-triggers without breaking the protocol UART. The 50 mA idle baseline is
-the powered-MCU quiescent draw on this hardware.
+| Pin (STM32) | Pi BCM | gpio_byte bit | Phase             | Mean I |
+|-------------|--------|---------------|-------------------|--------|
+| PA0         | 17     | bit 0         | Setup / Verify    | 85 mA  |
+| PA1         | 27     | bit 1         | ServerWait        | 55 mA  |
+| PA4         | 22     | bit 2         | Mode-C UART burst | 88 mA  |
+| (none)      | —      | —             | Idle              | 50 mA  |
 
 ## Cell definition
 
 A **cell** is one experimental condition: a tuple of `(curve, mode, N)`
 with `replicas` independent runs for variance estimation.
 
-| Curve     | Mode | N            | Replicas | Purpose                              |
-|-----------|------|--------------|----------|--------------------------------------|
-| BN254     | A    | 1, 3, 10, 30 | 3        | AmorE per-round amortization sweep   |
-| BLS12_381 | A    | 1, 3, 10, 30 | 3        | Same, for the larger-security curve  |
-| BN254     | B    | 10           | 3        | Direct RELIC pp_map_oatep_k12 baseline |
-| BLS12_381 | B    | 10           | 3        | Same                                 |
+| Curve     | Mode | N    | Replicas | Purpose                              |
+|-----------|------|------|----------|--------------------------------------|
+| BN254     | A    | 1, 3, 10, 30 | 3 | AmorE per-round amortization sweep     |
+| BLS12_381 | A    | 1, 3, 10, 30 | 3 | Same, for the larger-security curve     |
+| BN254     | B    | 10           | 3 | Direct RELIC pp_map_oatep_k12 baseline  |
+| BLS12_381 | B    | 10           | 3 | Same                                    |
 
 Mode A = AmorE protocol end-to-end.
 Mode B = N consecutive direct pairings, no protocol overhead.
-Mode C (deferred to a future iteration) = AmorE with UART-isolation
-trigger on PA4, used to attribute UART energy precisely.
+Mode C (deferred to a future iteration) = AmorE with UART-isolation trigger
+on PA4, used to attribute UART energy precisely.
 
 ## Replicas and statistics
 
@@ -66,93 +62,77 @@ trigger on PA4, used to attribute UART energy precisely.
 (stderr = stdev / √n). For n=3, stderr is roughly 0.6× stdev — sufficient
 when CV (coefficient of variation) is <1%, which matches the determinism
 of the underlying compute (BN254 CV measured at 0.115% on real hardware,
-see `doc/AmorE_BN128_Results.txt` §5).
+see doc/AmorE_BN128_Results.txt §5).
 
-If inter-replica variance during real-PPK2 measurement is dominated by
-power supply ripple rather than compute jitter, replica count will be
-revisited.
+When real PPK2 measurements arrive, we will revisit replica count — if
+inter-replica variance is dominated by power supply ripple rather than
+compute jitter, more replicas may be warranted.
 
-## Compiler optimization (-O2 vs -O3)
+## Pre-PPK2 vs PPK2
 
-The firmware is built with `CMAKE_BUILD_TYPE=Release`, which adds
-`-O3 -DNDEBUG` to the compiler flags. At `-O3`, GCC fully unrolls the
-inner CIOS Montgomery multiplication loops in `fp_mul`, eliminating
-per-iteration overhead and yielding a 2.14× speedup on all phases of
-the BLS12-381 measurement compared to the prior `-O2` build.
+For the Pre-PPK2 phase (this code is being written before the device
+arrives), traces are generated synthetically from the firmware's known
+cycle counts (doc/AmorE_*_Results.txt) combined with the current model
+in `measurement/ppk2-control/current_synthesis.py`.
 
-The number of UMLAL operations executed per `fp_mul` call is identical
-(~288) in both binaries; only per-iteration overhead differs. See
-`doc/AmorE_BLS12_381_Results.txt` Section 8 for the disassembly evidence
-and reproducible build commands for both optimization variants.
+The synthesis preserves three properties that matter for energy analysis:
 
-All measurements reported in this study use the `-O3` (Release) build
-(tag `measurement-O3-2026-05-12`, fp_mul = 1300 bytes, binary SHA prefix
-`4e2df263`).
+1. **Phase duration** — derived from cycle counts at 168 MHz.
+2. **Phase mean current** — from `current_synthesis.py` spec table.
+3. **Gaussian noise** with σ = 1.5–2.0% of mean, matching reported PPK2
+   noise floor.
 
-## Two scenarios: baseline firmware vs proposed Stop-mode optimization
+When PPK2 arrives, the change is purely upstream of the analysis layer:
+`scripts/run_cell.py` swaps its mock client for a real driver (one-line
+change, see `# IMPORT-SWITCH` comment). All downstream code is identical.
 
-The AmorE thesis — that delegation saves energy beyond a crossover batch
-size — depends critically on what the MCU does while waiting for the
-server's response. We model two scenarios:
 
-**BASELINE** (current firmware): `uart_recv_packet()` busy-waits with a
-running HSI clock and full HAL interrupt handling. ServerWait current
-stays at ~55 mA (close to compute current). With this firmware, AmorE
-per-round energy is *higher* than a single direct pairing — no crossover
-exists in any reasonable N range.
 
-**WITH_STOP** (proposed): MCU enters Stop mode immediately after sending
-the request, waking via RTC alarm or external interrupt when the
-response arrives. Stop mode quiescent current is in the sub-microamp
-range (STM32F407 datasheet: 0.4–0.6 µA typical). ServerWait energy
-becomes negligible, and the per-round energy asymptote shifts down by
-several orders of magnitude.
+### Important caveat: server compute time is compressed in Mock data
 
-Figure 4 displays both scenarios side-by-side. The two-row layout makes
-the delta unambiguous: top row = AmorE-loses, bottom row = AmorE-wins.
-Firmware support for the Stop-mode optimization is the gate to
-validating it on real PPK2 — will be detailed below.
+`analysis/fixtures/synthetic_cells.py` uses `MOCK_SERVER_COMPRESS = 100`
+to shrink the server's pairing compute time by 100× (from ~87 sec on
+the Pi to ~870 ms in the synthetic trace). This keeps trace files
+manageable in size — without it, BLS12_381 at N=30 would produce a
+~2 GB CSV per replica.
 
-## Crossover analysis
+**Consequence**: absolute ServerWait energy in the synthetic figures
+is ~100× smaller than reality. Per-round Compute energy is *not*
+affected (compute durations are at full size). The ratio of compute
+to wait is what the synthetic data is calibrated to represent.
 
-The central question — "is AmorE cheaper than direct pairing?" — is
-answered by `sleep_model.find_crossover(model, e_direct, k)`. It finds
-the smallest N where:
+When real PPK2 traces arrive, set `MOCK_SERVER_COMPRESS = 1` (or use
+the real-PPK2 backend, which writes traces at their natural rate) and
+the absolute numbers will match the firmware.
 
-```
-E_AmorE_per_round(N) ≤ k × E_direct_pairing
-```
+This caveat **corrects** an earlier (ADR-005 v1) claim that the
+synthetic data was "rate-agnostic". It is rate-agnostic *for compute*
+phases only; ServerWait energy magnitude in the figures should not
+be read literally.
 
-where k is the number of pairings AmorE replaces. For the protocol k=1
-(one verification pairing per round, served by N rounds of blinding).
-k=3 is reported as a sensitivity check (the original protocol cost
-analysis at higher operational budgets).
 
-A measured ratio outside the predicted range would warrant
-investigation: too high suggests overhead not accounted for; too low
-suggests unmeasured energy gains (e.g., LSI vs HSI clock during
-ServerWait).
+
+## ServerWait and the energy result
+
+While waiting for the server's response, the current firmware
+(`uart_recv_packet()`) busy-waits with a running clock and full HAL
+interrupt handling, so ServerWait current stays close to the compute
+current. Under this firmware the AmorE per-round energy is *higher*
+than a single direct pairing on the same MCU: the measured compute
+energy ratios are 1.88× (BN254) and 1.96× (BLS12-381), and the time
+ratios 1.93× / 1.72×. AmorE on this Cortex-M4 is not an energy or
+speed optimization; its value is elsewhere — memory footprint
+(21× less working SRAM, 4.2× less Flash, apples-to-apples), avoidance
+of a pairing library on the client, and verifiability of the delegated
+result. See doc/AmorE_BN128_Results.txt §11 and the results document.
 
 ## Honest limitations
 
-- **No temperature or battery-curve effects.** Pi power supply is
+- **Synthetic phase durations are derived from cycle counts**, not from
+  the as-measured PPK2 traces. They will be replaced 1:1 when real
+  measurements are available.
+- **Mock PPK2 quiescent current is 0 µA** (no current sensor). Real PPK2
+  measurements add a quiescent floor of ~50 mA (powered MCU).
+- **No temperature or battery-curve effects** — Pi power supply is
   assumed steady. PPK2 reports voltage per-sample, so any deviation
   will be visible in the trace.
-
-- **The 100 µs-scale wake-up transient** is not always synthesized in
-  the analytical model. Real PPK2 at 100 ksps should resolve a ~13 µs
-  / 80 mA spike on each Stop→Run transition; the model overlays this
-  only when `stop_mode=True`.
-
-- **RELIC direct-pairing baseline** is currently the pre-O3 measurement
-  (BLS12-381: 523.4 ms per pairing, from the 2026-05-07 measurement
-  session). A like-for-like comparison against the post-O3 AmorE
-  numbers requires rebuilding RELIC with `CMAKE_BUILD_TYPE=Release` and
-  re-measuring. Headline ratios involving the RELIC baseline are
-  flagged "pending RELIC re-measurement at -O3" until that work
-  completes. See `docs/future_work.md`.
-
-- **BN254 baseline** is the 2026-04-01 measurement at the
-  `pre-port-bn254-working` firmware tag (also pre-O3). BN254
-  re-measurement on the unified-curves branch is blocked by an
-  fp12_mul curve-specificity issue; see `docs/future_work.md`.

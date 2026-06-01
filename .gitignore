@@ -68,3 +68,7 @@ analysis/dedekind_discovery_final_v46.md
 *.diff
 *.pre-energy-backup
 *.pre-*-backup
+*.bak.*
+amore.sh
+output.txt
+status.sh
