@@ -463,6 +463,28 @@ printf "[N=50] blind_total=%llu  verify_total=%llu  amort=%u\\n", g_results.blin
 printf "=== END ===\\n"
 quit
 """
+    elif mode == "MICRO":
+        gdb_cmds = f"""set pagination off
+set print pretty on
+target extended-remote | ssh {rpi_user}@{rpi_host} 'sudo openocd -f /home/pi/rpi_swd.cfg -c "gdb port pipe; log_output /dev/null"'
+file {elf_path}
+monitor halt
+printf "status   = 0x%08x\\n", g_micro.status
+printf "last_error = %u\\n", g_micro.last_error
+printf "p_cyc    = %u\\n", g_micro.p_cyc
+printf "m1_var   = %u\\n", g_micro.m1_var
+printf "m1_fix   = %u\\n", g_micro.m1_fix
+printf "m1_short = %u\\n", g_micro.m1_short
+printf "m2_var   = %u\\n", g_micro.m2_var
+printf "m2_fix   = %u\\n", g_micro.m2_fix
+printf "m2_short = %u\\n", g_micro.m2_short
+printf "mT_full  = %u\\n", g_micro.mT_full
+printf "mT_short = %u\\n", g_micro.mT_short
+printf "memT     = %u\\n", g_micro.memT
+printf "=== END ===\\n"
+monitor resume
+quit
+"""
     else:
         gdb_cmds = f"""set pagination off
 set print pretty on
@@ -503,7 +525,7 @@ quit
                    ("status", "wall", "total", "ots", "n_iter", "cycles", "[N=",
                     "current", "last", "init", "sanity", "n_iterations",
                     "blind_total", "verify_total", "amort",
-                    "pairing_min", "==="))
+                    "pairing_min", "p_cyc", "m1_", "m2_", "mT_", "memT", "==="))
         ]
         out_txt.write_text("\n".join(keep) + "\n")
         ok = bool(keep) and any("status" in ln for ln in keep)
@@ -528,7 +550,7 @@ def default_duration(curve: str, mode: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--curve", required=True, choices=["BN254", "BLS12_381"])
-    p.add_argument("--mode", required=True, choices=["A", "B"])
+    p.add_argument("--mode", required=True, choices=["A", "B", "MICRO"])
     p.add_argument("--replica", type=int, required=True)
     p.add_argument("--elf", type=Path, required=True,
                    help="Path to firmware ELF for this curve+mode")
