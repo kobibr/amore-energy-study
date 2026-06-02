@@ -11,7 +11,25 @@ one AmorE delegation vs one local pairing. Energy is phase-aware: the
 current is measured during the compute phase (GPIO bit0), not the
 full-trace median, which would be dominated by the busy-wait phase.
 
-## Headline numbers
+## Headline — batch delegation (the question the AmorE paper targets)
+
+AmorE exists to delegate MANY pairings. Delegating 50 pairings (batch),
+client compute energy, RELIC primitives on both sides:
+
+    Curve       50x local pairing   AmorE batch(50)   AmorE saves
+    ---------   -----------------   ---------------   -----------------
+    BN254          4,262 mJ            2,669 mJ        37%  (1,593 mJ)
+    BLS12-381      8,998 mJ            3,880 mJ        57%  (5,117 mJ)
+
+Cycles MEASURED (microbench); batch client cost DERIVED (paper formula);
+energy PROJECTED (derived cycles x measured current); compute-only (no
+comm, no server-wait). Reproducible: analysis/fair_comparison/.
+
+The section below is a DIFFERENT, least-favorable quantity: SINGLE
+delegation (M=1) with the hand-written HOME Fp12 (not batch, not RELIC).
+Kept for completeness, NOT the protocol value proposition.
+
+## Single delegation, home implementation (least favorable)
 
                   AmorE/round    1 x RELIC pairing    Ratio    Result
     -----------   ------------   ------------------   ------   ------------------
