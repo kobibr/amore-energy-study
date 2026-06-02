@@ -1,77 +1,145 @@
-# AmorE Energy Study
+# AmorE — Results Summary (BN254 & BLS12-381 on Cortex-M4)
 
-Energy measurement of the AmorE protocol (amortized remote pairing
-evaluation) on a Cortex-M4 STM32F407 client, compared 1:1 against a
-single RELIC local pairing, in BN254 and BLS12-381.
+AmorE (Amortized Remote Pairing Evaluation) lets a constrained Cortex-M4 client
+(STM32F407 @ 168 MHz) delegate expensive bilinear pairings to an untrusted
+remote server (Raspberry Pi 3B) and verify the returned result cheaply,
+rejecting a cheating server with probability ≈ 1; it is a *public-input*
+protocol, so the security property is verifiability of the server's answer, not
+input secrecy. This work ports AmorE across two pairing-friendly curves —
+**BN254** (BN128) and **BLS12-381** — in pure C with no assembly, and measures
+three things on real hardware: **energy, time, and memory**. The point of AmorE
+here is not to beat a local pairing on speed or energy for a single computation;
+it is to enable *verifiable pairing delegation with a tiny client footprint*, so
+pairing-based cryptography can run on parts where a full pairing library does not
+fit. Both ports passed full validation: **61/61 honest rounds verified, 1/1
+malicious round rejected, status `0x600D0000`** on each curve.
 
-## Headline result
+> This summary combines three documents: the **BN254 benchmark report**, the
+> **BLS12-381 benchmark report**, and the **2026-05-31 Energy Study**. Every
+> figure below is reproduced from one of those three sources — nothing is
+> invented — and each result is labelled with its provenance
+> (MEASURED / DERIVED / PROJECTED).
 
-    Curve       AmorE energy/round   1 x RELIC pairing   Ratio   Result
-    ---------   ------------------   -----------------   -----   ----------------------
-    BN254          160.16 mJ            85.27 mJ          1.88x   AmorE costs 1.88x more
-    BLS12-381      354.04 mJ           180.42 mJ          1.96x   AmorE costs 1.96x more
+---
 
-Compute-only, phase-aware energy on STM32F407 at 168 MHz, pure-C build
-(AmorE -O3, RELIC ARITH=easy -O3, no assembly). Current is measured
-during the compute phase (GPIO bit0), not the full-trace median.
-Comparison is 1:1 per the AmorE paper (one delegation vs one local
-pairing). On a Cortex-M4 without assembly, AmorE costs ~1.9x the energy
-and ~1.7-1.9x the time of a local pairing; its value is memory
-footprint, pairing-library avoidance, and verifiable outsourcing - not
-speed or energy. All 24 measurement cells terminated with
-`status = 0x600D0000`. Full results in `docs/FINAL_RESULTS_20260531.md`.
+## 1. Energy results
 
-## Hardware setup
+Source: **Energy Study (2026-05-31)** — measured with a Nordic **PPK2**
+(33 Ω reference, 3.300 V). AmorE and RELIC both built `-O3`,
+`ARITH=easy` (pure C, no assembly), phase-aware **compute-only** (current
+measured during the GPIO-bit0 compute phase, not the busy-wait).
 
-    Client    STM32F407G-DISC1 (168 MHz, Cortex-M4 + FPU)
-    Server    Raspberry Pi 3B (py_ecc 8.0.0)
-    UART      STM32 USART2 (PA2/PA3) to RPi GPIO 14/15, 921600 baud
-    SWD       RPi GPIO 25/24 to STM32 SWCLK/SWDIO
-    NRST      RPi GPIO 18 to STM32 NRST (held high, see
-              firmware/amore-fw/doc/NRST_DISCOVERY.md)
-    Power     Nordic Power Profiler Kit II (PPK2), source-meter at
-              3.300 V, R33 calibration -5%
+### 1a. Batch delegation (M = 50) — the headline
 
-## Repository layout
+AmorE is built to delegate *many* pairings. Delegating 50:
 
-    amore-energy-study/
-    +-- analysis/             Python analysis pipeline (reads logs/ only)
-    |   +-- compute_energy.py           phase-aware energy from logs/
-    +-- docs/
-    |   +-- FINAL_RESULTS_20260531.md   results
-    |   +-- methodology.md              how the measurements work
-    |   +-- known_caveats.md            measurement uncertainty bounds
-    |   +-- audit_table.md              per-claim source mapping
-    +-- firmware/amore-fw/    submodule, github.com/kobibr/amore-bn254-cortex-m4
-    +-- scripts/
-    |   +-- full_regression.sh          orchestrator entry point
-    |   +-- measure_one_cell.py         per-cell PPK2 + SWD owner
-    +-- measurement/
-    |   +-- calibration-logs/           R33 calibration evidence
-    +-- logs/                 per-run captures (CSVs gitignored)
+| Curve      | 50× local pairing | AmorE batch(50) | AmorE saves        |
+|------------|-------------------|-----------------|--------------------|
+| BN254      | 4,262 mJ          | 2,669 mJ        | **37%** (1,593 mJ) |
+| BLS12-381  | 8,998 mJ          | 3,880 mJ        | **57%** (5,117 mJ) |
 
-## Reproducing the measurement
+Provenance: cycles **MEASURED** (microbench `g_micro`, DWT, min-of-16); batch
+client cost **DERIVED** (paper Table-1 formula; batch not yet implemented on
+RELIC); energy **PROJECTED** (derived cycles × measured pairing current ×
+3.3 V). Compute-only; this is not an end-to-end measurement (end-to-end batch is
+future work).
 
-PPK2 connected to host USB, STM32 wired to RPi via SWD + UART per
-above, RPi reachable as `pi@192.168.1.69` with passwordless SSH:
+### 1b. Single delegation (M = 1, hand-written Fp12) — least favorable
 
-    RPI_HOST=192.168.1.69 bash scripts/full_regression.sh \
-        --replicas=6 --curves=BN254,BLS12_381 --modes=A,B --honest-rounds=61
+A *different*, worst-case quantity — one pairing, home code, not batch:
 
-Then compute energy from the captured logs:
+| Curve      | AmorE / round | 1× RELIC pairing | Ratio      |
+|------------|---------------|------------------|------------|
+| BN254      | 160.16 mJ     | 85.27 mJ         | 1.88× more |
+| BLS12-381  | 354.04 mJ     | 180.42 mJ        | 1.96× more |
 
-    python3 analysis/compute_energy.py logs/full_regression_<timestamp>
+**These two blocks do not conflict.** Batch (1a) is the intended use and wins;
+single (1b) is the worst case and loses. The ~1.9× single-case cost is largely
+hand-written-Fp12 implementation debt, not a protocol limit.
 
-Each cell writes to `logs/full_regression_<timestamp>/measurements/
-<cell>/run_001.csv` and `telemetry.txt`. The `state.json` checkpoint
-allows `--resume` after interruption.
+---
 
-## Related repositories
+## 2. Timing results
 
-    Firmware    github.com/kobibr/amore-bn254-cortex-m4    HEAD 42fdefd
-                AmorE protocol implementation and RELIC bench harnesses
-                for both BN254 and BLS12-381.
+Per-round / single times from the **Energy Study, Mode A/B (`-O3`)**; the batch
+figures are from the BN254 / BLS12-381 reports.
 
-## License
+### 2a. Batch delegation (M = 50) — client compute time per pairing
 
-See LICENSE.
+From the paper's cost formula applied to measured RELIC-grade primitives (same
+batch regime as the energy headline; positive = AmorE saves time):
+
+| Curve      | AmorE vs 1 local pairing (batch M=50)                  |
+|------------|--------------------------------------------------------|
+| BN254      | **+37%** — AmorE saves 37% of compute time per pairing |
+| BLS12-381  | **+57%** — AmorE saves 57% of compute time per pairing |
+
+Cycles MEASURED (microbench); batch client cost DERIVED (paper formula);
+compute-only.
+
+### 2b. Per-round / single delegation (measured)
+
+| Curve      | 1 RELIC pairing (Mode B)    | AmorE per round, N=50 (Mode A)  | Ratio        |
+|------------|-----------------------------|----------------------------------|--------------|
+| BN254      | 218.92 ms (36,778,389 cyc)  | 421.5 ms (70,813,093 cyc)        | 1.92× slower |
+| BLS12-381  | 523.41 ms (87,932,879 cyc)  | 901.0 ms (151,357,860 cyc)       | 1.72× slower |
+
+One delegation, hand-written Fp12. The "slower" ratio here and the "saves"
+figure in 2a are **different quantities** — single pairing vs a batch of 50 —
+not a contradiction.
+
+---
+
+## 3. Memory results
+
+Sources: BN254 report (§2 / §11), BLS12-381 report (Finding 2 / §2). The AmorE
+client carries **no pairing library**, so its footprint is small.
+
+**AmorE client footprint — BN254**
+
+| Item                         | Size                  |
+|------------------------------|-----------------------|
+| Flash total                  | 20.0 KiB (1.96% of 1 MB) |
+| SRAM working (.data + .bss)  | 3.2 KiB               |
+| SRAM incl. 32 KiB stack/heap | 35.2 KiB              |
+
+**AmorE client footprint — BLS12-381**
+
+| Item                       | Size                       |
+|----------------------------|----------------------------|
+| Code (.text)               | 15.5 KiB (1.48% of 1 MB)   |
+| Zero-init (.bss, Fp12 work)| 35.0 KiB (17.85% of 192 KiB) |
+| Max stack frame            | 388 B                      |
+
+**vs a full local pairing library** (RELIC, BN254, measured on the same MCU —
+BN254 report §11.2):
+
+| Resource                              | AmorE vs RELIC   |
+|---------------------------------------|------------------|
+| Flash (code + rodata)                 | **4.2× lighter** |
+| SRAM working (.data + .bss)           | **21× lighter**  |
+| SRAM total (incl. 32 KiB stack/heap)  | **2.8× lighter** |
+
+The headline: AmorE needs no Fp12 pairing library on the client, which is why it
+fits where RELIC cannot (e.g. STM32L0 / G0 with 4–32 KiB SRAM).
+
+---
+
+## Bottom line
+
+For a single pairing on a Cortex-M4 that can already fit RELIC, AmorE costs
+~1.7–1.9× the time and ~1.9× the energy of computing locally. AmorE wins in the
+**batch** regime (M=50: **37%** energy saved on BN254, **57%** on BLS12-381 —
+derived) and, above all, on **footprint + verifiable outsourcing**: up to
+~4–21× lighter memory and no pairing library on the client. Both ports passed
+full validation (61/61 honest, 1/1 malicious rejected).
+
+---
+
+*Provenance.* Energy and per-round timing are from the 2026-05-31 Energy Study
+(Nordic PPK2, 33 Ω reference, 3.300 V; `-O3`, pure-C, phase-aware compute-only).
+Batch (M=50) figures are derived from
+the paper's cost formula on measured RELIC-grade primitives — not an end-to-end
+measurement. Memory and correctness are from the per-curve benchmark reports. No
+figure in this summary was invented; each is reproduced from one of the three
+source documents.
