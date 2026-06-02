@@ -57,6 +57,6 @@ current is ~103 mA, distinctly lower than the compute current.
 
     Claim                                       Value         Status         Source
     -----------------------------------------   -----------   ------------   --------------------------------
-    PPK2 absolute current accuracy              -5.0%         measured       33-ohm reference at 3.300 V
+    PPK2 absolute current accuracy              n/a           not measured   no reference resistor; ratios robust
                                                                              measurement/calibration-logs/
                                                                              calibration_20260528_clean_R33.txt

@@ -1,3 +1,13 @@
+!!! CORRECTION (added later) !!!
+No physical 33-ohm reference resistor was actually used. No reference
+resistor was available. This run sampled the DUT current, not a known
+100 mA reference, so the figures below are NOT a reference calibration
+and the "expected 100.0 mA / -5% deviation" framing does not apply.
+The PPK2 was uncalibrated (modifiers['Calibrated']=='0'). Absolute mA/mJ
+are indicative only; ratios and cycle/time figures are robust.
+See docs/known_caveats.md.
+=====================================================================
+
 PPK2 Calibration Report (CLEAN re-run)
 Timestamp: 2026-05-28T12:35
 PPK2 port: /dev/ttyACM0

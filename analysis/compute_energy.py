@@ -32,7 +32,10 @@ from pathlib import Path
 
 F_HZ = 168_000_000.0
 V_NOMINAL = 3.300
-R33_CAL = 0.95          # PPK2 -5% absolute accuracy (33-ohm reference)
+R33_CAL = 0.95          # NOTE: NOT a measured calibration factor. No
+                        # reference resistor was used. This is a fixed
+                        # gain that CANCELS in all A/B ratios. Absolute
+                        # mA/mJ are indicative only; ratios are robust.
 CURVES = ("bn254", "bls12_381")
 REPLICAS = range(1, 7)
 CURRENT_SANITY_UA = (0.0, 200_000.0)   # drop impossible samples

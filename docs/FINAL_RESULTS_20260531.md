@@ -104,8 +104,9 @@ time for Mode A; the remaining ~99.6% is busy-wait of
 current (~103 mA) is lower than the compute current (~115-119 mA);
 using the full-trace median would understate compute energy by ~10%.
 Compute-only is the apples-to-apples figure independent of server
-speed. PPK2 absolute accuracy is bounded at -5% (33-ohm resistor
-reference, 3.300 V).
+speed. PPK2 absolute accuracy is NOT established (no reference resistor was
+used); absolute mA/mJ are indicative only, while ratios and cycle/time
+figures are calibration-independent.
 
 Full methodology in `docs/methodology.md`. Calibration evidence in
 `measurement/calibration-logs/`. Known caveats in

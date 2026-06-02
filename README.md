@@ -24,8 +24,9 @@ malicious round rejected, status `0x600D0000`** on each curve.
 
 ## 1. Energy results
 
-Source: **Energy Study (2026-05-31)** — measured with a Nordic **PPK2**
-(33 Ω reference, 3.300 V). AmorE and RELIC both built `-O3`,
+Source: **Energy Study (2026-05-31)** — measured with a Nordic **PPK2** at
+3.300 V (uncalibrated; no reference resistor — absolute mA/mJ are
+indicative only, ratios are calibration-independent). AmorE and RELIC both built `-O3`,
 `ARITH=easy` (pure C, no assembly), phase-aware **compute-only** (current
 measured during the GPIO-bit0 compute phase, not the busy-wait).
 
@@ -137,7 +138,8 @@ full validation (61/61 honest, 1/1 malicious rejected).
 ---
 
 *Provenance.* Energy and per-round timing are from the 2026-05-31 Energy Study
-(Nordic PPK2, 33 Ω reference, 3.300 V; `-O3`, pure-C, phase-aware compute-only).
+(Nordic PPK2 at 3.300 V, uncalibrated — no reference resistor; absolute
+values indicative only, ratios calibration-independent; `-O3`, pure-C, phase-aware compute-only).
 Batch (M=50) figures are derived from
 the paper's cost formula on measured RELIC-grade primitives — not an end-to-end
 measurement. Memory and correctness are from the per-curve benchmark reports. No

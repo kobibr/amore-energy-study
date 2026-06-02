@@ -2,16 +2,7 @@
 
 ## Measurement uncertainty
 
-PPK2 absolute accuracy is bounded at -5.0% based on a 33-ohm
-reference resistor measurement at 3.300 V (expected 100.0 mA,
-measured 95.0 mA median). All reported current and energy values
-carry this bound. Calibration log:
-`measurement/calibration-logs/calibration_20260528_clean_R33.txt`.
-
-The PPK2 was operated in factory-default uncalibrated state
-(`modifiers['Calibrated'] == '0'`). The -5% deviation is therefore
-the systematic offset of this specific instrument; relative ratios
-within a single measurement session are not affected by it.
+The PPK2 was NOT calibrated against a known reference resistor. No reference resistor was available, so no absolute-accuracy measurement was performed; the instrument ran in its factory-default state (`modifiers['Calibrated'] == '0'`). Absolute current/energy (mA, mJ) are INDICATIVE ONLY and not traceable to a reference. RATIOS (AmorE vs RELIC) and CYCLE/TIME figures are robust: any fixed instrument gain cancels in a ratio, and cycles come from the on-chip DWT via GDB, never the PPK2.
 
 ## Statistical scope
 
