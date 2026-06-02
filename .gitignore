@@ -72,3 +72,8 @@ analysis/dedekind_discovery_final_v46.md
 amore.sh
 output.txt
 status.sh
+# scratch debug reports
+*_report.txt
+
+# garbage calibration runs (uncalibrated PPK2, no reference resistor)
+measurement/calibration-logs/calibration_2026060*_R33.txt
