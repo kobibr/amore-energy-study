@@ -1,0 +1,13 @@
+status   = 0x600d0000
+last_error = 0
+p_cyc    = 88090481
+m1_var   = 11705034
+m1_fix   = 11720989
+m1_short = 6838276
+m2_var   = 19202614
+m2_fix   = 19197287
+m2_short = 13107675
+mT_full  = 29374337
+mT_short = 20306122
+memT     = 9784880
+=== END ===

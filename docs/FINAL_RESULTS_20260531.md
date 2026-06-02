@@ -116,3 +116,27 @@ optimization on a part where RELIC already fits. Its value is:
 
 Per-cell measurement logs, telemetry, and CSVs (large) are retained
 in `logs/`.
+
+## 50-round batch energy: local vs AmorE (added 2026-06-02)
+
+The protocol question the AmorE paper targets: run 50 pairings locally vs
+delegate 50 via AmorE (batch M=50). Built from the microbench raw g_micro
+(measured) + the paper's Table-1 formula (derived) + the measured RELIC
+pairing current (projected energy). Compute-only; reproducible via
+`analysis/fair_comparison/compute_fair.py`.
+
+    Curve       50x local pairing   AmorE batch(50)    AmorE saves
+    ---------   -----------------   ---------------    -----------
+    BN254          4,262 mJ            2,669 mJ        37%  (1,593 mJ)
+    BLS12-381      8,998 mJ            3,880 mJ        57%  (5,117 mJ)
+
+Provenance: cycles MEASURED (g_micro, DWT, min-of-16); batch client cost
+DERIVED (paper formula; batch client not implemented on RELIC); energy
+PROJECTED (derived cycles x measured pairing current x 3.3 V). This is NOT a
+direct end-to-end measurement — it excludes communication and server-wait.
+A direct end-to-end measurement (implement batch on RELIC, measure with
+PPK2) is LEVEL 2 / FUTURE WORK.
+
+Note: this is distinct from the §"Headline" 1.88x/1.96x, which is the
+single-delegation HOME implementation (M=1, amortized over N=50 rounds) —
+a different quantity (single vs batch, home Fp12 vs RELIC).
