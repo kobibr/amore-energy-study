@@ -74,7 +74,7 @@ if [[ -z "${RPI_HOST:-}" ]]; then
     fi
 fi
 RPI_USER="${RPI_USER:-pi}"
-PPK2_PORT="${PPK2_PORT:-/dev/ttyACM0}"
+export PPK2_PORT="${PPK2_PORT:-/dev/ttyACM0}"
 PPK2_VOLTAGE_MV="${PPK2_VOLTAGE_MV:-3300}"
 
 # ── Self-locate ────────────────────────────────────────────────────────────
@@ -246,23 +246,10 @@ cleanup() {
     # Kill any measure_one_cell.py we might have spawned
     pkill -P $$ -f measure_one_cell 2>/dev/null || true
 
-    # Force PPK2 OFF
-    python3 - <<'PYEOF' 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG" || true
-try:
-    import serial.tools.list_ports
-    from ppk2_api.ppk2_api import PPK2_API
-    port = next((p.device for p in serial.tools.list_ports.comports()
-                 if "PPK" in (p.description or "") or "Nordic" in (p.description or "")), None)
-    if port:
-        ppk = PPK2_API(port, timeout=2, write_timeout=2)
-        ppk.get_modifiers()
-        ppk.set_source_voltage(3300)
-        ppk.use_source_meter()
-        ppk.toggle_DUT_power("OFF")
-        print("[trap] PPK2 forced OFF")
-except Exception as e:
-    print(f"[trap] force-off failed: {e}")
-PYEOF
+    # Force PPK2 OFF — use the shared lib (open_clean: drains dirty buffer,
+    # picks ACM0 measurement port). Avoids the old inline that grabbed ttyACM1
+    # and crashed on UnicodeDecodeError from a dirty serial buffer.
+    python3 "$ES/scripts/lib/ppk2_force_off.py" 2>&1 | sed 's/^/      /' | tee -a "$MASTER_LOG" || true
 
     # Kill RPi processes
     ssh -o ConnectTimeout=3 "$RPI_USER@$RPI_HOST" \

@@ -4,26 +4,15 @@ A transient USB re-enumeration (port briefly absent) is tolerated: it pauses
 the streak rather than resetting it. Exit 0 only if 3 consecutive opens
 succeed."""
 import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ppk2_open import open_clean, find_ppk2_port
 
 def find_port():
-    # Prefer autodetect by description; fall back to env even if the path
-    # blinked out for a moment during re-enumeration.
-    try:
-        import serial.tools.list_ports
-        for p in serial.tools.list_ports.comports():
-            d = (p.description or "")
-            if "PPK" in d or "Nordic" in d:
-                return p.device
-    except Exception:
-        pass
-    env = os.environ.get("PPK2_PORT")
-    return env if (env and os.path.exists(env)) else None
+    return find_ppk2_port(os.environ.get("PPK2_PORT"))
 
 def try_open(port):
     try:
-        from ppk2_api.ppk2_api import PPK2_API
-        ppk = PPK2_API(port, timeout=2, write_timeout=2)
-        ppk.get_modifiers()
+        ppk = open_clean(port)
         try: ppk.ser.close()
         except Exception: pass
         return True

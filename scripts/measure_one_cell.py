@@ -52,6 +52,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/lib")
+from ppk2_open import open_clean  # shared opener: drains dirty buffer + picks ACM0
 
 # ── Constants ──────────────────────────────────────────────────────────────
 DEFAULT_VOLTAGE_MV = 3300
@@ -85,15 +87,19 @@ def log(msg: str) -> None:
 # ════════════════════════════════════════════════════════════════════════
 
 def _ppk2_port_present() -> str | None:
-    """Return path to PPK2 device by VID:PID, or None if absent."""
+    """Return path to PPK2 device by VID:PID, or None if absent.
+    PPK2 fw 1.2.4 exposes TWO ttyACM ports (measurement + shell), both
+    1915:c00a. The measurement port is the LOWER-numbered one (ttyACM0);
+    the shell port does not stream and hangs get_data(). Return the lowest."""
     import serial.tools.list_ports
+    matches = []
     for p in serial.tools.list_ports.comports():
         try:
             if p.vid == 0x1915 and p.pid == 0xc00a:
-                return p.device
+                matches.append(p.device)
         except Exception:
             pass
-    return None
+    return sorted(matches)[0] if matches else None
 
 
 def wait_for_ppk2_present(timeout_s: float = 60.0,
@@ -288,10 +294,7 @@ def hard_power_cycle_dut(ppk2, voltage_mv: int):
     
     # 4. Reopen + reconfigure
     log(f"[dut] hard power-cycle step 4/5: reopen PPK2 at {port}")
-    new_ppk2 = PPK2_API(port, timeout=2, write_timeout=2)
-    new_ppk2.get_modifiers()
-    new_ppk2.set_source_voltage(voltage_mv)
-    new_ppk2.use_source_meter()
+    new_ppk2 = open_clean(port, voltage_mv=voltage_mv, source_meter=True)
     time.sleep(1.0)  # let mode change settle
     
     # 5. DUT ON
@@ -310,10 +313,20 @@ def fatal(msg: str, code: int = 2) -> None:
 
 
 def discover_ppk2_port(hint: str | None) -> str:
-    """Find PPK2 serial port, preferring `hint` if it exists."""
+    """Find PPK2 serial port, preferring `hint` if it exists.
+    Else return the LOWEST 1915:c00a port (measurement, not the fw1.2.4 shell)."""
     import serial.tools.list_ports
     if hint and Path(hint).exists():
         return hint
+    matches = []
+    for p in serial.tools.list_ports.comports():
+        try:
+            if p.vid == 0x1915 and p.pid == 0xc00a:
+                matches.append(p.device)
+        except Exception:
+            pass
+    if matches:
+        return sorted(matches)[0]
     for p in serial.tools.list_ports.comports():
         desc = p.description or ""
         if "PPK" in desc or "Nordic" in desc:
@@ -406,6 +419,14 @@ def flash_via_rpi(
                 time.sleep(delay)
             continue
 
+        # Release any background gpioset holding NRST (GPIO18) — openocd needs
+        # GPIO18 as SRST. A lingering hold keeps the CPU in reset, causing
+        # "Failed to read/erase memory at 0x0" with pc=msp=0.
+        subprocess.run(
+            ["ssh", f"{rpi_user}@{rpi_host}",
+             "sudo pkill -f 'gpioset.*gpiochip0 18' 2>/dev/null; true"],
+            capture_output=True, text=True, timeout=15,
+        )
         try:
             result = subprocess.run(
                 [
@@ -663,8 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         log(f"[ppk2] opening at {port}")
 
         # 1. Open PPK2
-        ppk2 = PPK2_API(port, timeout=2, write_timeout=2)
-        ppk2.get_modifiers()
+        ppk2 = open_clean(port)
 
         # Detect calibration state — paper-grade caveat
         uncalibrated = (

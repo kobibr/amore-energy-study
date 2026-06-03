@@ -4,18 +4,25 @@ PPK2 D-channel health check (BETON-BARZEL with user wait loop).
 If D-channels stuck at 0, prints clear instruction and waits for user
 to unplug+replug PPK2. Re-checks until healthy, or user aborts.
 """
-import sys, time, collections
+import sys, time, collections, os
 import serial.tools.list_ports
 from ppk2_api.ppk2_api import PPK2_API
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ppk2_open import open_clean  # shared opener that drains dirty buffer
 
 def find_port():
+    # PPK2 fw 1.2.4 exposes TWO ttyACM ports (measurement + shell), both with
+    # vid:pid 1915:c00a. The measurement port is the LOWER-numbered one (ttyACM0);
+    # the shell port (ttyACM1) does not stream samples and hangs get_data().
+    # Collect all matches and return the lowest, matching full_regression's default.
+    matches = []
     for p in serial.tools.list_ports.comports():
         try:
             if p.vid == 0x1915 and p.pid == 0xc00a:
-                return p.device
+                matches.append(p.device)
         except Exception:
             pass
-    return None
+    return sorted(matches)[0] if matches else None
 
 def check_health():
     """Return tuple (healthy: bool, unique_values: list)."""
@@ -23,10 +30,7 @@ def check_health():
     if not port:
         return False, []
     try:
-        ppk2 = PPK2_API(port, timeout=2, write_timeout=2)
-        ppk2.get_modifiers()
-        ppk2.set_source_voltage(3300)
-        ppk2.use_source_meter()
+        ppk2 = open_clean(port, voltage_mv=3300, source_meter=True)
         ppk2.toggle_DUT_power("ON")
         time.sleep(3)
         ppk2.start_measuring()
