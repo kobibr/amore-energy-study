@@ -22,6 +22,20 @@ malicious round rejected, status `0x600D0000`** on each curve.
 
 ---
 
+## 0. Hardware setup
+
+**Architecture** — STM32F407 client, Raspberry Pi 3B server, and the Nordic
+PPK2 used for energy measurement:
+
+![Hardware Architecture](images/hardware_architecture.svg)
+
+**Physical setup** — the actual bench: Raspberry Pi 3B, STM32 board, and the
+Nordic PPK2:
+
+![Physical Setup](images/hardware_setup.jpg)
+
+---
+
 ## 1. Energy results
 
 Source: **Energy Study (2026-05-31)** — measured with a Nordic **PPK2** at

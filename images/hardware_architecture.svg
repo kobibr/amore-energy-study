@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>AmorE Energy Measurement - Hardware Architecture</title>
+  <desc>Three-host topology: Laptop, PPK2, RPi. Laptop controls PPK2 over USB and RPi over SSH. PPK2 powers and measures STM32. RPi flashes STM32 via GPIO bit-bang SWD and exchanges protocol data over UART. Laptop never connects directly to STM32.</desc>
+
+  <defs>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#185FA5" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#534AB7" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="760" fill="#FAFAF8"/>
+
+  <text x="480" y="36" text-anchor="middle" font-size="20" font-weight="600" fill="#2C2C2A">AmorE Energy Measurement — Hardware Setup</text>
+  <text x="480" y="58" text-anchor="middle" font-size="13" fill="#5F5E5A">Laptop talks only to PPK2 (USB) and RPi (SSH). STM32 is reached entirely through PPK2 and RPi.</text>
+
+  <g id="laptop">
+    <rect x="80" y="110" width="200" height="130" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-width="1.5"/>
+    <text x="180" y="138" text-anchor="middle" font-size="16" font-weight="600" fill="#0C447C">Laptop</text>
+    <text x="180" y="158" text-anchor="middle" font-size="11" fill="#185FA5">Linux + Python venv</text>
+    <line x1="100" y1="170" x2="260" y2="170" stroke="#B5D4F4" stroke-width="0.5"/>
+    <text x="180" y="190" text-anchor="middle" font-size="11" fill="#0C447C">run_benchmark.sh</text>
+    <text x="180" y="207" text-anchor="middle" font-size="11" fill="#0C447C">SSH orchestration</text>
+    <text x="180" y="224" text-anchor="middle" font-size="11" fill="#0C447C">PPK2 keep-alive (Python)</text>
+  </g>
+
+  <g id="ppk2">
+    <rect x="380" y="110" width="200" height="130" rx="10" fill="#FAEEDA" stroke="#854F0B" stroke-width="1.5"/>
+    <text x="480" y="138" text-anchor="middle" font-size="16" font-weight="600" fill="#633806">Nordic PPK2</text>
+    <text x="480" y="158" text-anchor="middle" font-size="11" fill="#854F0B">Power Profiler Kit II</text>
+    <line x1="400" y1="170" x2="560" y2="170" stroke="#FAC775" stroke-width="0.5"/>
+    <text x="480" y="190" text-anchor="middle" font-size="11" fill="#633806">Source mode @ 3.3 V</text>
+    <text x="480" y="207" text-anchor="middle" font-size="11" fill="#633806">Current measurement</text>
+    <text x="480" y="224" text-anchor="middle" font-size="11" fill="#633806">D0/D1/D2 trigger capture</text>
+  </g>
+
+  <g id="rpi">
+    <rect x="680" y="110" width="200" height="130" rx="10" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.5"/>
+    <text x="780" y="138" text-anchor="middle" font-size="16" font-weight="600" fill="#085041">Raspberry Pi 3B+</text>
+    <text x="780" y="158" text-anchor="middle" font-size="11" fill="#0F6E56">on local network</text>
+    <line x1="700" y1="170" x2="860" y2="170" stroke="#9FE1CB" stroke-width="0.5"/>
+    <text x="780" y="190" text-anchor="middle" font-size="11" fill="#085041">OpenOCD (bit-bang SWD)</text>
+    <text x="780" y="207" text-anchor="middle" font-size="11" fill="#085041">server.py (UART protocol)</text>
+    <text x="780" y="224" text-anchor="middle" font-size="11" fill="#085041">SSH daemon</text>
+  </g>
+
+  <line x1="280" y1="175" x2="380" y2="175" stroke="#185FA5" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="290" y="155" width="80" height="20" rx="3" fill="#FAFAF8" stroke="#B5D4F4" stroke-width="0.5"/>
+  <text x="330" y="169" text-anchor="middle" font-size="10" fill="#0C447C">USB</text>
+
+  <path d="M 180 110 Q 180 75 480 70 Q 780 75 780 110" fill="none" stroke="#185FA5" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrowBlue)"/>
+  <rect x="425" y="60" width="110" height="20" rx="3" fill="#FAFAF8" stroke="#B5D4F4" stroke-width="0.5"/>
+  <text x="480" y="74" text-anchor="middle" font-size="10" fill="#0C447C">SSH over network</text>
+
+  <g id="stm32">
+    <rect x="380" y="500" width="200" height="170" rx="10" fill="#EEEDFE" stroke="#3C3489" stroke-width="2"/>
+    <text x="480" y="528" text-anchor="middle" font-size="16" font-weight="600" fill="#26215C">STM32F407G-DISC1</text>
+    <text x="480" y="548" text-anchor="middle" font-size="11" fill="#3C3489">Cortex-M4 @ 168 MHz</text>
+    <line x1="400" y1="560" x2="560" y2="560" stroke="#CECBF6" stroke-width="0.5"/>
+    <text x="480" y="580" text-anchor="middle" font-size="11" fill="#26215C">P2 header: power (3V, GND)</text>
+    <text x="480" y="598" text-anchor="middle" font-size="11" fill="#26215C">CN2 header: SWD interface</text>
+    <text x="480" y="616" text-anchor="middle" font-size="11" fill="#26215C">PA2/PA3: USART2 (RPi UART)</text>
+    <text x="480" y="634" text-anchor="middle" font-size="11" fill="#26215C">PA0/PA1/PA4: triggers (PPK2)</text>
+    <line x1="400" y1="646" x2="560" y2="646" stroke="#CECBF6" stroke-width="0.5"/>
+    <text x="480" y="662" text-anchor="middle" font-size="11" font-weight="600" fill="#791F1F">CN1 USB cable: NOT USED</text>
+  </g>
+
+  <line x1="480" y1="240" x2="480" y2="500" stroke="#854F0B" stroke-width="3" marker-end="url(#arrowAmber)"/>
+  <rect x="395" y="345" width="170" height="60" rx="4" fill="#FAFAF8" stroke="#FAC775" stroke-width="1"/>
+  <text x="480" y="363" text-anchor="middle" font-size="11" font-weight="600" fill="#633806">PPK2 → STM32</text>
+  <text x="480" y="380" text-anchor="middle" font-size="10" fill="#854F0B">VOUT  →  P2 pin 3 (3V)</text>
+  <text x="480" y="395" text-anchor="middle" font-size="10" fill="#854F0B">GND   →  P2 pin 1</text>
+
+  <path d="M 800 240 L 800 400 Q 800 480 700 500 L 580 525" fill="none" stroke="#0F6E56" stroke-width="3" marker-end="url(#arrowTeal)"/>
+  <rect x="615" y="360" width="180" height="100" rx="4" fill="#FAFAF8" stroke="#9FE1CB" stroke-width="1"/>
+  <text x="705" y="378" text-anchor="middle" font-size="11" font-weight="600" fill="#085041">RPi → STM32 (SWD)</text>
+  <text x="705" y="394" text-anchor="middle" font-size="10" fill="#0F6E56">GPIO 25 (pin 22) → SWCLK</text>
+  <text x="705" y="409" text-anchor="middle" font-size="10" fill="#0F6E56">GPIO 24 (pin 18) → SWDIO</text>
+  <text x="705" y="424" text-anchor="middle" font-size="10" fill="#0F6E56">GPIO 18 (pin 12) → NRST</text>
+  <text x="705" y="439" text-anchor="middle" font-size="10" fill="#0F6E56">GND (pin 6) → CN2 pin 3</text>
+  <text x="705" y="454" text-anchor="middle" font-size="9" font-style="italic" fill="#0F6E56">flash + debug</text>
+
+  <path d="M 700 240 Q 350 270 200 380 Q 180 470 380 525" fill="none" stroke="#534AB7" stroke-width="3" stroke-dasharray="5,3" marker-end="url(#arrowPurple)"/>
+  <rect x="100" y="360" width="180" height="85" rx="4" fill="#FAFAF8" stroke="#CECBF6" stroke-width="1"/>
+  <text x="190" y="378" text-anchor="middle" font-size="11" font-weight="600" fill="#26215C">RPi ↔ STM32 (UART)</text>
+  <text x="190" y="394" text-anchor="middle" font-size="10" fill="#534AB7">GPIO 14 (TXD) → PA3 (RX)</text>
+  <text x="190" y="409" text-anchor="middle" font-size="10" fill="#534AB7">GPIO 15 (RXD) → PA2 (TX)</text>
+  <text x="190" y="424" text-anchor="middle" font-size="10" fill="#534AB7">921600 baud, USART2</text>
+  <text x="190" y="439" text-anchor="middle" font-size="9" font-style="italic" fill="#534AB7">AmorE protocol data</text>
+
+  <g id="legend">
+    <rect x="80" y="700" width="800" height="40" rx="6" fill="#FFFFFF" stroke="#D3D1C7" stroke-width="1"/>
+
+    <line x1="100" y1="720" x2="130" y2="720" stroke="#185FA5" stroke-width="2"/>
+    <text x="138" y="724" font-size="11" fill="#444441">USB</text>
+
+    <line x1="195" y1="720" x2="225" y2="720" stroke="#185FA5" stroke-width="2" stroke-dasharray="6,3"/>
+    <text x="233" y="724" font-size="11" fill="#444441">SSH / network</text>
+
+    <line x1="340" y1="720" x2="370" y2="720" stroke="#854F0B" stroke-width="3"/>
+    <text x="378" y="724" font-size="11" fill="#444441">Power + measurement</text>
+
+    <line x1="530" y1="720" x2="560" y2="720" stroke="#0F6E56" stroke-width="3"/>
+    <text x="568" y="724" font-size="11" fill="#444441">SWD (flash + debug)</text>
+
+    <line x1="700" y1="720" x2="730" y2="720" stroke="#534AB7" stroke-width="3" stroke-dasharray="5,3"/>
+    <text x="738" y="724" font-size="11" fill="#444441">UART (protocol data)</text>
+  </g>
+
+</svg>
