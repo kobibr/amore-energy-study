@@ -15,10 +15,10 @@ fit. Both ports passed full validation: **61/61 honest rounds verified, 1/1
 malicious round rejected, status `0x600D0000`** on each curve.
 
 > This summary combines three documents: the **BN254 benchmark report**, the
-> **BLS12-381 benchmark report**, and the **2026-05-31 Energy Study**. Every
-> figure below is reproduced from one of those three sources — nothing is
-> invented — and each result is labelled with its provenance
-> (MEASURED / DERIVED / PROJECTED).
+> **BLS12-381 benchmark report**, and the **Energy Study (40-cell regression,
+> 2026-06-04)**. Every figure below is reproduced from one of those three
+> sources — nothing is invented — and each result is labelled with its
+> provenance (MEASURED / DERIVED / PROJECTED).
 
 ---
 
@@ -38,11 +38,14 @@ Nordic PPK2:
 
 ## 1. Energy results
 
-Source: **Energy Study (2026-05-31)** — measured with a Nordic **PPK2** at
-3.300 V (uncalibrated; no reference resistor — absolute mA/mJ are
-indicative only, ratios are calibration-independent). AmorE and RELIC both built `-O3`,
-`ARITH=easy` (pure C, no assembly), phase-aware **compute-only** (current
-measured during the GPIO-bit0 compute phase, not the busy-wait).
+Source: **Energy Study (40-cell regression, 2026-06-04)** — measured with a
+Nordic **PPK2** at 3.300 V (uncalibrated; no reference resistor — absolute
+mA/mJ are indicative only, ratios are calibration-independent). AmorE and RELIC
+both built `-O3`, `ARITH=easy` (pure C, no assembly), phase-aware
+**compute-only** (current measured during the GPIO-bit0 compute phase, not the
+busy-wait). 10 replicas per cell (BLS12-381 Mode A: 9 — one replica's telemetry
+dump was truncated; its energy trace is valid but its amortized cycle count is
+excluded).
 
 ### 1a. Batch delegation (M = 50) — the headline
 
@@ -65,8 +68,8 @@ A *different*, worst-case quantity — one pairing, home code, not batch:
 
 | Curve      | AmorE / round | 1× RELIC pairing | Ratio      |
 |------------|---------------|------------------|------------|
-| BN254      | 160.16 mJ     | 85.27 mJ         | 1.88× more |
-| BLS12-381  | 354.04 mJ     | 180.42 mJ        | 1.96× more |
+| BN254      | 160.17 mJ     | 85.21 mJ         | 1.88× more |
+| BLS12-381  | 353.49 mJ     | 180.68 mJ        | 1.96× more |
 
 **These two blocks do not conflict.** Batch (1a) is the intended use and wins;
 single (1b) is the worst case and loses. The ~1.9× single-case cost is largely
@@ -96,8 +99,8 @@ compute-only.
 
 | Curve      | 1 RELIC pairing (Mode B)    | AmorE per round, N=50 (Mode A)  | Ratio        |
 |------------|-----------------------------|----------------------------------|--------------|
-| BN254      | 218.92 ms (36,778,389 cyc)  | 421.5 ms (70,813,093 cyc)        | 1.92× slower |
-| BLS12-381  | 523.41 ms (87,932,879 cyc)  | 901.0 ms (151,357,860 cyc)       | 1.72× slower |
+| BN254      | 218.92 ms (36,778,389 cyc)  | 422.11 ms (70,915,190 cyc)       | 1.93× slower |
+| BLS12-381  | 523.41 ms (87,932,879 cyc)  | 901.06 ms (151,378,878 cyc)      | 1.72× slower |
 
 One delegation, hand-written Fp12. The "slower" ratio here and the "saves"
 figure in 2a are **different quantities** — single pairing vs a batch of 50 —
@@ -151,11 +154,13 @@ full validation (61/61 honest, 1/1 malicious rejected).
 
 ---
 
-*Provenance.* Energy and per-round timing are from the 2026-05-31 Energy Study
-(Nordic PPK2 at 3.300 V, uncalibrated — no reference resistor; absolute
-values indicative only, ratios calibration-independent; `-O3`, pure-C, phase-aware compute-only).
-Batch (M=50) figures are derived from
-the paper's cost formula on measured RELIC-grade primitives — not an end-to-end
-measurement. Memory and correctness are from the per-curve benchmark reports. No
-figure in this summary was invented; each is reproduced from one of the three
-source documents.
+*Provenance.* Energy and per-round timing are from the Energy Study (40-cell
+regression, 2026-06-04: 2 curves × 2 modes × 10 replicas; BLS12-381 Mode A
+n=9 — one truncated telemetry dump), superseding the 2026-05-31 study with the
+same methodology. Nordic PPK2 at 3.300 V, uncalibrated — no reference resistor;
+absolute values indicative only, ratios calibration-independent; `-O3`, pure-C,
+phase-aware compute-only. Batch (M=50) figures are derived from the paper's cost
+formula on measured RELIC-grade primitives — not an end-to-end measurement.
+Memory and correctness are from the per-curve benchmark reports. No figure in
+this summary was invented; each is reproduced from one of the three source
+documents.
