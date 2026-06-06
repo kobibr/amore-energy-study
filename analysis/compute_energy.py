@@ -37,7 +37,7 @@ R33_CAL = 0.95          # NOTE: NOT a measured calibration factor. No
                         # gain that CANCELS in all A/B ratios. Absolute
                         # mA/mJ are indicative only; ratios are robust.
 CURVES = ("bn254", "bls12_381")
-REPLICAS = range(1, 7)
+REPLICAS = range(1, 11)  # 10 replicas per cell (was 6; full_regression runs --replicas=10)
 CURRENT_SANITY_UA = (0.0, 200_000.0)   # drop impossible samples
 
 def compute_phase_mean_uA(csv_path: Path, compute_only: bool) -> tuple[float, int]:

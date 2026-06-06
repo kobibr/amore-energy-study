@@ -1,0 +1,46 @@
+{
+  "bn254_A": {
+    "I_mA": 114.98,
+    "I_std_mA": 0.56,
+    "cycles": 70915190,
+    "time_ms": 422.11,
+    "E_mJ": 160.17,
+    "n_replicas": 10,
+    "phase": "compute(bit0)"
+  },
+  "bn254_B": {
+    "I_mA": 117.94,
+    "I_std_mA": 0.2,
+    "cycles": 36778389,
+    "time_ms": 218.92,
+    "E_mJ": 85.21,
+    "n_replicas": 10,
+    "phase": "full(pairing)"
+  },
+  "bls12_381_A": {
+    "I_mA": 118.88,
+    "I_std_mA": 0.33,
+    "cycles": 151378878,
+    "time_ms": 901.06,
+    "E_mJ": 353.49,
+    "n_replicas": 9,
+    "phase": "compute(bit0)"
+  },
+  "bls12_381_B": {
+    "I_mA": 104.6,
+    "I_std_mA": 0.17,
+    "cycles": 87932879,
+    "time_ms": 523.41,
+    "E_mJ": 180.68,
+    "n_replicas": 10,
+    "phase": "full(pairing)"
+  },
+  "bn254_ratio": {
+    "energy": 1.88,
+    "time": 1.93
+  },
+  "bls12_381_ratio": {
+    "energy": 1.96,
+    "time": 1.72
+  }
+}
