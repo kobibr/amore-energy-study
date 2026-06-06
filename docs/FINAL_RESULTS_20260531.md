@@ -135,7 +135,7 @@ optimization on a part where RELIC already fits. Its value is:
 ## Reproducibility
 
     Orchestrator    github.com/kobibr/amore-energy-study
-    Firmware        github.com/kobibr/amore-bn254-cortex-m4
+    Firmware        github.com/kobibr/amore-bn254-cortex-m4    HEAD 6563e19
     RELIC library   ARITH=easy (pure C), FP_PRIME per curve, -O3
     Run             logs/full_regression_20260604_020247 (40 cells)
     Energy pipeline analysis/compute_energy.py -> energy_real.json

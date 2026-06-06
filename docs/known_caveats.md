@@ -14,9 +14,7 @@ ratios are expected to be insensitive to chip selection.
 Mode B replication is 10 cells per curve. Cycle-level reproducibility
 is exact (`pair_min_cycles` standard deviation is 0 across 10
 replicas, both curves). Current standard deviation across replicas
-is below 0.5%. Mode A replication is 1-3 cells; replica count is
-bounded by experiment time (the slow py_ecc server makes each Mode A
-replica 76-91 minutes long), not by statistical need.
+is below 0.5%. Mode A replication is 10 cells per curve, EXCEPT BLS12-381 Mode A, which aggregates 9: one replica (r8) had a truncated GDB telemetry dump, so its amortized cycle count is excluded from the Mode A average. Its PPK2 energy trace (CSV) is valid and complete; only the telemetry-derived cycle field is missing. All 40 cells themselves ran to completion with status = 0x600D0000.
 
 ## Energy attribution
 
