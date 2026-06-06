@@ -154,6 +154,25 @@ full validation (61/61 honest, 1/1 malicious rejected).
 
 ---
 
+## Repository layout & reproducing
+
+- **This repo** (`amore-energy-study`) — the measurement orchestrator and
+  analysis. `analysis/` (energy pipeline + tests), `scripts/` (regression +
+  per-cell driver), `docs/` (FINAL_RESULTS, known_caveats), `measurement/`
+  (PPK2 control), `images/` (the diagrams above).
+- **Firmware** — submodule `firmware/amore-fw`
+  ([amore-bn254-cortex-m4](https://github.com/kobibr/amore-bn254-cortex-m4)):
+  the STM32 client and RPi server. See its `doc/SYSTEM_DOC.md` for the
+  architecture, UART protocol, wiring, and status codes, and the per-curve
+  benchmark reports in `doc/`.
+- **Reproduce the energy numbers:**
+  `pip install -r requirements.txt`, then `scripts/full_regression.sh` drives
+  the 40-cell run, and `analysis/compute_energy.py <run_dir>` produces
+  `energy_real.json`. The final measured numbers are tracked at
+  `analysis/results/energy_real_20260605.json`.
+
+---
+
 *Provenance.* Energy and per-round timing are from the Energy Study (40-cell
 regression, 2026-06-04: 2 curves × 2 modes × 10 replicas; BLS12-381 Mode A
 n=9 — one truncated telemetry dump), superseding the 2026-05-31 study with the
