@@ -20,8 +20,10 @@ Energy model (compute-only, phase-aware):
       Mean (not median) is used: energy is the time-integral of power,
       E = integral(I)dt = mean(I) * duration, and V is constant
       (PPK2 source-meter, 3.300 V), so mean(I)*V is the exact mean power.
-  - V              : 3.300 V (source-meter), with -5% R33 calibration
-                     applied to current.
+  - V              : 3.300 V (source-meter). A fixed 0.95 gain factor is
+                     applied to current; it is NOT a reference calibration
+                     (no reference resistor was used) and CANCELS in all
+                     A/B ratios. Absolute mA/mJ are indicative only.
 
 No synthetic data. No baseline constants. Every number traces to a
 sample in logs/ or a DWT counter in telemetry.txt.
@@ -32,19 +34,18 @@ from pathlib import Path
 
 F_HZ = 168_000_000.0
 V_NOMINAL = 3.300
-R33_CAL = 0.95          # NOTE: NOT a measured calibration factor. No
-                        # reference resistor was used. This is a fixed
-                        # gain that CANCELS in all A/B ratios. Absolute
-                        # mA/mJ are indicative only; ratios are robust.
+GAIN = 0.95             # Fixed gain factor. NOT a reference calibration
+                        # (no reference resistor was used). CANCELS in all
+                        # A/B ratios; absolute mA/mJ are indicative only.
 CURVES = ("bn254", "bls12_381")
 REPLICAS = range(1, 11)  # 10 replicas per cell (was 6; full_regression runs --replicas=10)
 CURRENT_SANITY_UA = (0.0, 200_000.0)   # drop impossible samples
 
 def compute_phase_mean_uA(csv_path: Path, compute_only: bool) -> tuple[float, int]:
-    """Mean current (uA, calibrated) over the compute phase (bit0) or full trace.
+    """Mean current (uA, fixed-gain) over the compute phase (bit0) or full trace.
 
     Streaming: never holds the whole CSV in memory (cells are ~80M rows).
-    Returns (mean_uA_calibrated, n_samples)."""
+    Returns (mean_uA, n_samples)."""
     total = 0.0; n = 0
     lo, hi = CURRENT_SANITY_UA
     with open(csv_path, newline="") as fh:
@@ -61,7 +62,7 @@ def compute_phase_mean_uA(csv_path: Path, compute_only: bool) -> tuple[float, in
             total += c; n += 1
     if n == 0:
         return 0.0, 0
-    return (total / n) * R33_CAL, n
+    return (total / n) * GAIN, n
 
 def telemetry_cycles(txt_path: Path, mode: str) -> int | None:
     """Mode A -> amort at N=50; Mode B -> pairing_min."""

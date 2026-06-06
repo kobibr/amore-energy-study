@@ -77,3 +77,7 @@ status.sh
 
 # garbage calibration runs (uncalibrated PPK2, no reference resistor)
 measurement/calibration-logs/calibration_2026060*_R33.txt
+report/figures/
+measurement/full-runs/
+measurement/overnight-20260528/
+docs/methodology.md
